@@ -106,6 +106,12 @@ static func new_game() -> Dictionary:
 		"log": [],
 	}
 
+## 先手をくじ引きで決める
+static func pick_first(state: Dictionary, names: Array) -> void:
+	var t := randi() % 3
+	state["turn"] = t
+	state["log"].append("先手は %s（%s）" % [names[t], player_name_default(t)])
+
 static func copy_state(s: Dictionary) -> Dictionary:
 	return s.duplicate(true)
 
@@ -457,6 +463,7 @@ static func _check_winner(state: Dictionary) -> bool:
 	return false
 
 ## 手番を次の人に回す。動けない人は詰みとして脱落させる。
+## 王手をかけられた人がいれば、その人が先に指す（そのあとはその人の次から順に回る）。
 static func advance_turn(state: Dictionary) -> void:
 	if _check_winner(state):
 		return
@@ -465,6 +472,17 @@ static func advance_turn(state: Dictionary) -> void:
 		state["log"].append("%d手に達したので引き分け" % MAX_MOVES)
 		return
 	var p: int = state["turn"]
+	for k in [1, 2]:
+		var q: int = (p + k) % 3
+		if not state["alive"][q] or not in_check(state["board"], q, state["alive"]):
+			continue
+		if has_legal_move(state, q):
+			state["turn"] = q
+			state["log"].append("　→ %sに王手！%sが先に指す" % [player_name_default(q), player_name_default(q)])
+			return
+		eliminate(state, q, "詰み（王手から逃げられない）")
+		if _check_winner(state):
+			return
 	for _n in 6:
 		p = (p + 1) % 3
 		if not state["alive"][p]:

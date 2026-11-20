@@ -20,6 +20,7 @@ const DEFAULT_PORT := 24565
 const ID_CPU := 0
 const ID_LOCAL := -2
 const CPU_DELAY := 0.6
+const UNDO_WAIT := 2.0
 const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 enum Mode { NONE, ONLINE, LOCAL, SERVER }
@@ -154,6 +155,7 @@ func _start_room() -> void:
 			seats_new.append({"id": ID_CPU, "name": "CPU%d" % i})
 	room["seats"] = seats_new
 	room["state"] = Rules.new_game()
+	Rules.pick_first(room["state"], _seat_names(seats_new))
 	room["in_game"] = true
 	for m in room["members"]:
 		_begin.rpc_id(m["id"], seats_new)
@@ -182,6 +184,8 @@ func _req_resign() -> void:
 	var seat := _seat_in(room, id)
 	if seat >= 0:
 		Rules.resign(room["state"], seat)
+		room["prev"] = {}   # 投了のあとは待ったできない
+		room["state"]["undo_seat"] = -1
 		_push(room)
 
 
@@ -233,6 +237,13 @@ func _room_of(id: int) -> Dictionary:
 #  部屋の進行（サーバーとこの端末だけの両方で使う）
 # =====================================================================
 
+func _seat_names(s: Array) -> Array:
+	var out: Array = []
+	for x in s:
+		out.append(str(x["name"]))
+	return out
+
+
 func _seat_in(room: Dictionary, id: int) -> int:
 	for i in room["seats"].size():
 		if room["seats"][i]["id"] == id:
@@ -246,7 +257,29 @@ func _room_try_move(room: Dictionary, seat: int, m: Dictionary) -> void:
 		return
 	if not Rules.is_legal(st, seat, m):
 		return
+	# 待ったに備えて、指す前の盤面をとっておく（手番ごとに1回まで）
+	var used: Array = room.get("undo_used", [false, false, false])
+	var undoable: bool = not used[seat]
+	used[seat] = false
+	room["undo_used"] = used
+	var before := Rules.copy_state(st)
 	Rules.apply_move(st, m)
+	room["prev"] = before if undoable else {}
+	st["undo_seat"] = seat if undoable and st["winner"] < 0 else -1
+	_push(room)
+
+
+## 待った：いま指したばかりの人が、次の人が指す前に取り消す
+func _room_undo(room: Dictionary, seat: int) -> void:
+	var st: Dictionary = room["state"]
+	var prev: Dictionary = room.get("prev", {})
+	if seat < 0 or st.is_empty() or prev.is_empty() or st["winner"] >= 0 or st.get("undo_seat", -1) != seat:
+		return
+	room["prev"] = {}
+	prev["undo_seat"] = -1
+	prev["log"].append("%s が待った" % str(room["seats"][seat]["name"]))
+	room["undo_used"][seat] = true
+	room["state"] = prev
 	_push(room)
 
 
@@ -261,7 +294,9 @@ func _push(room: Dictionary) -> void:
 			_sync.rpc_id(m["id"], st)
 	room["cpu_at"] = 0.0
 	if not st.is_empty() and st["winner"] < 0 and room["seats"][st["turn"]]["id"] == ID_CPU:
-		room["cpu_at"] = Time.get_ticks_msec() / 1000.0 + CPU_DELAY
+		# 人が指した直後は、待ったできるように少し長めに待つ
+		var wait := UNDO_WAIT if st.get("undo_seat", -1) >= 0 else CPU_DELAY
+		room["cpu_at"] = Time.get_ticks_msec() / 1000.0 + wait
 
 
 func _cpu_tick(room: Dictionary) -> void:
@@ -279,6 +314,8 @@ func _cpu_tick(room: Dictionary) -> void:
 		Rules.resign(st, t)
 	else:
 		Rules.apply_move(st, m)
+	room["prev"] = {}
+	st["undo_seat"] = -1
 	_push(room)
 
 
@@ -411,6 +448,7 @@ func start_local(humans: int, player_name: String) -> void:
 	my_seat = 0 if humans == 1 else -1
 	in_game = true
 	_local_room = {"members": [], "seats": seats, "state": Rules.new_game(), "cpu_at": 0.0}
+	Rules.pick_first(_local_room["state"], _seat_names(seats))
 	state = _local_room["state"]
 	game_started.emit()
 	_push(_local_room)
@@ -455,12 +493,44 @@ func submit_move(m: Dictionary) -> void:
 			_req_move.rpc_id(1, m)
 
 
+## この端末で「待った」を押せるか
+func can_undo() -> bool:
+	if state.is_empty() or state["winner"] >= 0:
+		return false
+	var u: int = state.get("undo_seat", -1)
+	if u < 0:
+		return false
+	if mode == Mode.LOCAL:
+		return seats[u]["id"] == ID_LOCAL
+	return u == my_seat
+
+
+func undo() -> void:
+	match mode:
+		Mode.LOCAL:
+			_room_undo(_local_room, state.get("undo_seat", -1))
+		Mode.ONLINE:
+			_req_undo.rpc_id(1)
+
+
+@rpc("any_peer", "reliable")
+func _req_undo() -> void:
+	if mode != Mode.SERVER:
+		return
+	var id := multiplayer.get_remote_sender_id()
+	var room := _room_of(id)
+	if not room.is_empty():
+		_room_undo(room, _seat_in(room, id))
+
+
 func resign() -> void:
 	match mode:
 		Mode.LOCAL:
 			var t := controllable_seat()
 			if t >= 0:
 				Rules.resign(state, t)
+				_local_room["prev"] = {}
+				state["undo_seat"] = -1
 				_push(_local_room)
 		Mode.ONLINE:
 			_req_resign.rpc_id(1)

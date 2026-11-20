@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.4"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.5"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -32,6 +32,7 @@ var _player_boxes: Array = []   ## 席ごと {"title": Label, "hand": HFlowConta
 var _log: RichTextLabel
 var _rematch_btn: Button
 var _resign_btn: Button
+var _undo_btn: Button
 var _promo: ConfirmationDialog
 var _promo_moves: Array = []
 
@@ -169,6 +170,8 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_on_join()
 		elif a == "--create-room":
 			_on_create()
+		elif a == "--undo-test":
+			_undo_test.call_deferred()
 	if DisplayServer.get_name() == "headless":
 		Net.message.connect(func(t): print("[%s] %s" % [_player_name(), t]))
 	if _start_when > 0:
@@ -185,6 +188,27 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			if Net.state["winner"] >= 0:
 				print("[%s] GAME OVER winner=%d" % [_player_name(), Net.state["winner"]])
 				get_tree().create_timer(1.0).timeout.connect(get_tree().quit))
+
+
+## 待ったの動作確認（この端末だけの対局で）
+func _undo_test() -> void:
+	var firsts := {}
+	for i in 12:
+		Net.start_local(1, "T")
+		firsts[Net.state["turn"]] = true
+	print("先手に選ばれた席: ", firsts.keys())
+	while Net.state["turn"] != 0:
+		await get_tree().process_frame
+	var n0: int = Net.state["move_no"]
+	Net.submit_move(Rules.cpu_choose(Net.state, 0))
+	var ok1: bool = Net.can_undo() and Net.state["move_no"] == n0 + 1
+	Net.undo()
+	var ok2: bool = Net.state["move_no"] == n0 and Net.state["turn"] == 0 and not Net.can_undo()
+	Net.submit_move(Rules.cpu_choose(Net.state, 0))
+	var ok3 := not Net.can_undo()   # 1手番に2回目の待ったはできない
+	print("待ったテスト: 指した直後=%s 取り消し=%s 2回目は不可=%s" % [ok1, ok2, ok3])
+	print("最後の棋譜: ", Net.state["log"].slice(-3))
+	get_tree().quit()
 
 
 func _auto_play() -> void:
@@ -444,6 +468,9 @@ func _build_game() -> void:
 	v.add_child(help)
 
 	var hb := HBoxContainer.new()
+	_undo_btn = _btn("待った", func(): Net.undo())
+	_undo_btn.tooltip_text = "いま指した手を取り消す（次の人が指す前・手番ごとに1回まで）"
+	hb.add_child(_undo_btn)
 	_resign_btn = _btn("投了", func(): Net.resign())
 	hb.add_child(_resign_btn)
 	_rematch_btn = _btn("もう一局", _on_rematch)
@@ -489,6 +516,8 @@ func _play_sounds(st: Dictionary) -> void:
 	var alive := Rules.alive_count(st)
 	if moved:
 		Sfx.play("capture" if st.get("last_cap", false) else "koma")
+	elif st["move_no"] < _prev_move_no:
+		Sfx.play("select")  # 待った
 	if st["winner"] >= 0 and _prev_winner < 0:
 		get_tree().create_timer(0.2).timeout.connect(func(): Sfx.play("win"))
 	elif alive < _prev_alive:
@@ -548,6 +577,7 @@ func _refresh_game() -> void:
 	var lines: Array = st["log"]
 	_log.text = "\n".join(lines.slice(max(0, lines.size() - 200)))
 	_resign_btn.disabled = ctl < 0 and not (Net.mode != Net.Mode.LOCAL and Net.my_seat >= 0 and st["alive"][Net.my_seat] and st["winner"] < 0)
+	_undo_btn.disabled = not Net.can_undo()
 	_rematch_btn.visible = Net.is_owner() or Net.mode == Net.Mode.LOCAL
 	_rematch_btn.disabled = st["winner"] < 0
 

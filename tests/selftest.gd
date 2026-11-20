@@ -43,6 +43,27 @@ func _init() -> void:
 	check(rt.has(Rules.CENTER) and rt.has(Rules.idx(1, 0, 4)) and rt.has(Rules.idx(2, 0, 4)), "飛が中央を通り抜けない")
 	check(not rt.has(Rules.idx(0, 1, 4)), "飛が元のマスに戻る")
 	print("角の行き先: %d マス / 飛の行き先: %d マス" % [kt.size(), rt.size()])
+	# 1c. 王手をかけられた人がすぐ次に指す（赤が緑に王手 → 緑の番 → 次は赤）
+	var cs := Rules.new_game()
+	var cb: Array = empty.duplicate()
+	for p in 3:
+		cb[Rules.idx(p, 0, 4)] = Rules.make_piece(p, Rules.OU, false)
+	cb[Rules.idx(2, 1, 0)] = Rules.make_piece(0, Rules.HI, false)
+	cb[Rules.idx(1, 0, 0)] = Rules.make_piece(1, Rules.KY, false)
+	cs["board"] = cb
+	cs["turn"] = 0
+	var cm := {"from": Rules.idx(2, 1, 0), "to": Rules.idx(2, 0, 0), "drop": -1, "promote": false}
+	check(Rules.is_legal(cs, 0, cm), "王手の手が指せない")
+	Rules.apply_move(cs, cm)
+	check(cs["turn"] == 2, "王手された緑の番にならない（turn=%d）" % cs["turn"])
+	var esc: Array = Rules.moves_from(cs, 2, Rules.idx(2, 0, 4))
+	var em: Dictionary = esc[0]
+	for x in esc:
+		if Rules.cell_r(x["to"]) == 1:
+			em = x
+	Rules.apply_move(cs, em)
+	check(cs["turn"] == 0, "王手のあとの順番がちがう（turn=%d）" % cs["turn"])
+	print("王手の順番: ", cs["log"])
 	# 2. 初期局面は3人とも同じ手の数
 	var st := Rules.new_game()
 	var counts := []
