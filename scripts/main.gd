@@ -33,6 +33,18 @@ var _log: RichTextLabel
 var _rematch_btn: Button
 var _resign_btn: Button
 var _undo_btn: Button
+var _main_opt: OptionButton
+var _byo_opt: OptionButton
+var _clock_label: Label
+var _warned_turn_key := ""
+
+const MAIN_TIMES := [["なし", 0], ["1分", 60], ["3分", 180], ["5分", 300], ["10分", 600], ["20分", 1200]]
+const BYO_TIMES := [["なし", 0], ["10秒", 10], ["20秒", 20], ["30秒", 30], ["60秒", 60]]
+
+
+func _apply_clock_setting() -> void:
+	Net.main_sec = MAIN_TIMES[_main_opt.selected][1]
+	Net.byo_sec = BYO_TIMES[_byo_opt.selected][1]
 var _promo: ConfirmationDialog
 var _promo_moves: Array = []
 
@@ -89,12 +101,17 @@ func _load_settings() -> void:
 	if cf.load(SETTINGS_PATH) == OK:
 		_name_edit.text = cf.get_value("main", "name", _name_edit.text)
 		_server_edit.text = cf.get_value("main", "server", Net.DEFAULT_SERVER)
+		_main_opt.selected = clampi(cf.get_value("main", "main_index", 0), 0, MAIN_TIMES.size() - 1)
+		_byo_opt.selected = clampi(cf.get_value("main", "byo_index", 0), 0, BYO_TIMES.size() - 1)
+	_apply_clock_setting()
 
 
 func _save_settings() -> void:
 	var cf := ConfigFile.new()
 	cf.set_value("main", "name", _player_name())
 	cf.set_value("main", "server", _server_url())
+	cf.set_value("main", "main_index", _main_opt.selected)
+	cf.set_value("main", "byo_index", _byo_opt.selected)
 	cf.save(SETTINGS_PATH)
 
 
@@ -150,6 +167,12 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_server_edit.text = a.substr(13)
 		elif a == "--auto":
 			_auto = true
+		elif a.begins_with("--main="):
+			Net.main_sec = int(a.substr(7))
+		elif a.begins_with("--byo="):
+			Net.byo_sec = int(a.substr(6))
+		elif a.begins_with("--quit-after-sec="):
+			get_tree().create_timer(float(a.substr(17))).timeout.connect(get_tree().quit)
 		elif a.begins_with("--start-when="):
 			_start_when = int(a.substr(13))
 	for a in args:
@@ -255,6 +278,26 @@ func _build_lobby() -> void:
 	_name_edit.text = "プレイヤー"
 	_name_edit.max_length = 16
 	v.add_child(_row("名前", _name_edit))
+
+	_main_opt = OptionButton.new()
+	for item in MAIN_TIMES:
+		_main_opt.add_item(item[0])
+	_byo_opt = OptionButton.new()
+	for item in BYO_TIMES:
+		_byo_opt.add_item(item[0])
+	for o in [_main_opt, _byo_opt]:
+		o.item_selected.connect(func(_i):
+			_apply_clock_setting()
+			_save_settings())
+	var th_row := HBoxContainer.new()
+	th_row.add_child(_main_opt)
+	var byo_l := Label.new()
+	byo_l.text = "　秒読み"
+	th_row.add_child(byo_l)
+	th_row.add_child(_byo_opt)
+	_main_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_byo_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	v.add_child(_row("持ち時間", th_row))
 
 	# --- 部屋に入る前 ---
 	var entry := VBoxContainer.new()
@@ -397,6 +440,9 @@ func _show_lobby() -> void:
 	_room_code_label.text = "部屋コード：%s" % Net.room_code
 	_start_btn.visible = Net.is_owner()
 	_wait_label.visible = in_room and not Net.is_owner()
+	# 部屋では、作った人の制限時間が使われる
+	_main_opt.disabled = in_room and not Net.is_owner()
+	_byo_opt.disabled = _main_opt.disabled
 	_copy_btn.text = "招待リンクをコピー" if OS.has_feature("web") else "部屋コードをコピー"
 
 
@@ -432,6 +478,14 @@ func _build_game() -> void:
 	_turn_label.add_theme_font_size_override("font_size", 22)
 	_turn_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	v.add_child(_turn_label)
+	_clock_label = Label.new()
+	_clock_label.add_theme_font_size_override("font_size", 20)
+	v.add_child(_clock_label)
+	var tick := Timer.new()
+	tick.wait_time = 0.25
+	tick.autostart = true
+	tick.timeout.connect(_update_clock)
+	add_child(tick)
 
 	for p in 3:
 		var box := PanelContainer.new()
@@ -447,10 +501,13 @@ func _build_game() -> void:
 		var t := Label.new()
 		t.add_theme_color_override("font_color", BoardView.PLAYER_COLORS[p].lightened(0.35))
 		bv.add_child(t)
+		var clk := Label.new()
+		clk.add_theme_font_size_override("font_size", 16)
+		bv.add_child(clk)
 		var hand := HFlowContainer.new()
 		bv.add_child(hand)
 		v.add_child(box)
-		_player_boxes.append({"title": t, "hand": hand})
+		_player_boxes.append({"title": t, "hand": hand, "clock": clk})
 
 	var lg := Label.new()
 	lg.text = "棋譜"
@@ -580,6 +637,56 @@ func _refresh_game() -> void:
 	_undo_btn.disabled = not Net.can_undo()
 	_rematch_btn.visible = Net.is_owner() or Net.mode == Net.Mode.LOCAL
 	_rematch_btn.disabled = st["winner"] < 0
+
+
+## 考え中の時間と残り時間を表示する
+func _update_clock() -> void:
+	if not _game_root.visible or Net.state.is_empty():
+		return
+	var st := Net.state
+	if st["winner"] >= 0:
+		_clock_label.text = ""
+		return
+	var el := Net.turn_elapsed()
+	var t: int = st["turn"]
+	var text := "⏱ 考え中 %s" % Net.fmt_time(el)
+	var col := Color(0.9, 0.9, 0.9)
+	if Net.has_clock(st):
+		var info := _clock_info(st, t, el)
+		text += "　" + info[0]
+		if info[1] <= 10.0:
+			col = Color(1.0, 0.35, 0.3)
+			# 自分の番で残り10秒を切ったら1回だけ知らせる
+			var key := "%d/%d/%s" % [t, st["move_no"], info[0].left(2)]
+			if Net.controllable_seat() == t and _warned_turn_key != key:
+				_warned_turn_key = key
+				Sfx.play("check")
+	_clock_label.text = text
+	_clock_label.add_theme_color_override("font_color", col)
+	# 3人それぞれの持ち時間
+	for p in 3:
+		var lbl: Label = _player_boxes[p]["clock"]
+		if not Net.has_clock(st) or not st["alive"][p]:
+			lbl.text = ""
+			continue
+		var info := _clock_info(st, p, el if p == t else 0.0)
+		lbl.text = "⏱ " + info[0]
+		lbl.add_theme_color_override("font_color", Color(1.0, 0.45, 0.4) if p == t and info[1] <= 10.0 else Color(0.85, 0.85, 0.85))
+
+
+## [表示する文字, 残り秒] を返す。持ち時間が残っていれば持ち時間、なければ秒読み
+func _clock_info(st: Dictionary, p: int, el: float) -> Array:
+	var bank: float = float(st["bank"][p]) - el
+	var byo: int = st.get("byo", 0)
+	if bank > 0.0:
+		var label := "持ち時間 %s" % Net.fmt_time(ceil(bank))
+		if byo > 0:
+			label += "（秒読み%d秒）" % byo
+		return [label, bank + (byo if byo > 0 else 0)]
+	if byo > 0:
+		var rest: float = byo + bank
+		return ["秒読み %d" % int(ceil(max(rest, 0.0))), rest]
+	return ["持ち時間 0:00", 0.0]
 
 
 func _on_rematch() -> void:

@@ -46,12 +46,71 @@ var _pending: Callable    ## 接続できたらやること
 var test_rooms := false   ## サーバーのテスト用
 
 
+var main_sec := 0          ## 持ち時間（秒、0 = なし）。部屋を作った人の設定
+var byo_sec := 0           ## 秒読み（秒、0 = なし）
+var _recv_time := 0.0      ## 盤面を受け取った時刻（考え中の時間の計算用）
+
+
 func _process(_dt: float) -> void:
 	if mode == Mode.SERVER:
 		for code in _rooms.keys():
 			_cpu_tick(_rooms[code])
+			if _rooms.has(code):
+				_time_tick(_rooms[code])
 	elif mode == Mode.LOCAL and not _local_room.is_empty():
 		_cpu_tick(_local_room)
+		_time_tick(_local_room)
+
+
+static func _now() -> float:
+	return Time.get_ticks_msec() / 1000.0
+
+
+## いまの手番の人が考えている時間（秒）
+func turn_elapsed() -> float:
+	if state.is_empty():
+		return 0.0
+	return float(state.get("elapsed", 0.0)) + (_now() - _recv_time)
+
+
+static func fmt_time(sec: float) -> String:
+	var s := int(max(sec, 0.0))
+	return "%d:%02d" % [s / 60, s % 60]
+
+
+## 対局の時計を用意する（持ち時間は3人とも同じ）
+static func _init_clock(st: Dictionary, main: int, byo: int) -> void:
+	st["main"] = clampi(main, 0, 7200)
+	st["byo"] = clampi(byo, 0, 600)
+	st["bank"] = [float(st["main"]), float(st["main"]), float(st["main"])]
+
+
+static func has_clock(st: Dictionary) -> bool:
+	return int(st.get("main", 0)) > 0 or int(st.get("byo", 0)) > 0
+
+
+## 指した人の持ち時間から、使った時間を引く
+static func _spend(st: Dictionary, seat: int, used: float) -> void:
+	if st.has("bank"):
+		st["bank"][seat] = max(0.0, float(st["bank"][seat]) - used)
+
+
+## 持ち時間と秒読みを使い切ったら、その人の負け（CPUは対象外）
+func _time_tick(room: Dictionary) -> void:
+	var st: Dictionary = room.get("state", {})
+	if st.is_empty() or st["winner"] >= 0 or not has_clock(st):
+		return
+	var t: int = st["turn"]
+	if room["seats"][t]["id"] == ID_CPU:
+		return
+	var allowed: float = float(st["bank"][t]) + float(st["byo"])
+	if _now() - room.get("turn_start", _now()) < allowed:
+		return
+	st["bank"][t] = 0.0
+	Rules.timeout(st, t)
+	room["prev"] = {}
+	st["undo_seat"] = -1
+	_push(room)
 
 
 func is_owner() -> bool:
@@ -140,13 +199,15 @@ func _send_members(room: Dictionary) -> void:
 
 
 @rpc("any_peer", "reliable")
-func _start_room() -> void:
+func _start_room(main: int = 0, byo: int = 0) -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
 	var room := _room_of(id)
 	if room.is_empty() or room["owner"] != id:
 		return
+	room["turn_key"] = ""
+	room["clock"] = [main, byo]
 	var seats_new: Array = []
 	for i in 3:
 		if i < room["members"].size():
@@ -155,6 +216,7 @@ func _start_room() -> void:
 			seats_new.append({"id": ID_CPU, "name": "CPU%d" % i})
 	room["seats"] = seats_new
 	room["state"] = Rules.new_game()
+	_init_clock(room["state"], main, byo)
 	Rules.pick_first(room["state"], _seat_names(seats_new))
 	room["in_game"] = true
 	for m in room["members"]:
@@ -263,10 +325,20 @@ func _room_try_move(room: Dictionary, seat: int, m: Dictionary) -> void:
 	used[seat] = false
 	room["undo_used"] = used
 	var before := Rules.copy_state(st)
+	var used_time: float = _now() - room.get("turn_start", _now())
+	_spend(st, seat, used_time)
+	var log_at: int = st["log"].size()
 	Rules.apply_move(st, m)
+	if log_at < st["log"].size():
+		st["log"][log_at] += "（%s）" % _fmt_used(used_time)
 	room["prev"] = before if undoable else {}
 	st["undo_seat"] = seat if undoable and st["winner"] < 0 else -1
 	_push(room)
+
+
+static func _fmt_used(sec: float) -> String:
+	var s := int(sec)
+	return "%d秒" % s if s < 60 else "%d分%02d秒" % [s / 60, s % 60]
 
 
 ## 待った：いま指したばかりの人が、次の人が指す前に取り消す
@@ -286,8 +358,16 @@ func _room_undo(room: Dictionary, seat: int) -> void:
 ## 部屋の全員に盤面を送る。CPU の番なら少し待ってから指す。
 func _push(room: Dictionary) -> void:
 	var st: Dictionary = room["state"]
+	# 手番が変わったら、考え中の時間を0から数え直す
+	if not st.is_empty():
+		var key := "%d/%d/%s" % [st["turn"], st["move_no"], str(st["alive"])]
+		if room.get("turn_key", "") != key:
+			room["turn_key"] = key
+			room["turn_start"] = _now()
+		st["elapsed"] = _now() - room["turn_start"]
 	if mode == Mode.LOCAL:
 		state = st
+		_recv_time = _now()
 		state_changed.emit()
 	else:
 		for m in room["members"]:
@@ -313,7 +393,11 @@ func _cpu_tick(room: Dictionary) -> void:
 	if m.is_empty():
 		Rules.resign(st, t)
 	else:
+		var used_time: float = _now() - room.get("turn_start", _now())
+		var log_at: int = st["log"].size()
 		Rules.apply_move(st, m)
+		if log_at < st["log"].size():
+			st["log"][log_at] += "（%s）" % _fmt_used(used_time)
 	room["prev"] = {}
 	st["undo_seat"] = -1
 	_push(room)
@@ -356,7 +440,7 @@ func join_room(url: String, code: String, player_name: String) -> void:
 
 func start_game() -> void:
 	if mode == Mode.ONLINE:
-		_start_room.rpc_id(1)
+		_start_room.rpc_id(1, main_sec, byo_sec)
 	elif mode == Mode.LOCAL:
 		var humans := 0
 		for s in seats:
@@ -430,6 +514,7 @@ func _seats_update(s: Array) -> void:
 @rpc("authority", "reliable")
 func _sync(s: Dictionary) -> void:
 	state = s
+	_recv_time = _now()
 	state_changed.emit()
 
 
@@ -448,6 +533,7 @@ func start_local(humans: int, player_name: String) -> void:
 	my_seat = 0 if humans == 1 else -1
 	in_game = true
 	_local_room = {"members": [], "seats": seats, "state": Rules.new_game(), "cpu_at": 0.0}
+	_init_clock(_local_room["state"], main_sec, byo_sec)
 	Rules.pick_first(_local_room["state"], _seat_names(seats))
 	state = _local_room["state"]
 	game_started.emit()

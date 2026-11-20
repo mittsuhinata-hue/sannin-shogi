@@ -607,6 +607,17 @@ static func _reset_positions(state: Dictionary) -> void:
 	state["movers"] = []
 	state["checks"] = []
 
+## 時間切れ：その人の負け
+static func timeout(state: Dictionary, pl: int) -> void:
+	if not state["alive"][pl] or state["winner"] >= 0:
+		return
+	var was_turn: bool = state["turn"] == pl
+	eliminate(state, pl, "時間切れ")
+	if was_turn:
+		advance_turn(state)
+	else:
+		_check_winner(state)
+
 static func resign(state: Dictionary, pl: int) -> void:
 	if not state["alive"][pl] or state["winner"] >= 0:
 		return
