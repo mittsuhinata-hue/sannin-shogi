@@ -122,20 +122,23 @@ static func step(h: int, r: int, f: int, dr: int, df: int) -> Array:
 		return []
 	if nr <= TOP:
 		return [h, nr, nf, dr, df]
-	if nf == MID:
-		return [3, 0, 0, 0, 0]   # 5筋の先・その斜めは中央
-	if f == MID:
-		return []                # 5筋から斜めに越えることはできない
+	if f == MID and nf == MID:
+		return [3, 0, 0, 0, 0]   # 5筋をまっすぐ進むと中央
+	# 中央の三角マスの角をはさんだ斜め：4筋・6筋の奥 ⇔ となりの人の5筋の奥
+	if f == MID - 1 and nf == MID:
+		return [(h + 2) % 3, TOP, MID, -1, -1]
+	if f == MID + 1 and nf == MID:
+		return [(h + 1) % 3, TOP, MID, -1, 1]
 	var q := (h + 1) % 3 if nf > MID else (h + 2) % 3
 	return [q, TOP, 8 - nf, -dr, -df]
 
 ## 中央のマスから、持ち主の向きで v=(前, 右) へ進んだ先（複数あり得る）。
-## 前＝相手2人の陣地、後ろ＝自分の陣地、横＝なし。
+## 前＝相手2人の5筋、後ろ＝自分の5筋。中央は5筋とだけつながり、横・斜めはない。
 static func center_steps(owner: int, v: Array) -> Array:
 	var out: Array = []
 	var fwd: int = v[0]
 	var side: int = v[1]
-	if fwd == 0:
+	if fwd == 0 or side != 0:
 		return out
 	var hs: Array = []
 	if fwd > 0:
@@ -145,11 +148,7 @@ static func center_steps(owner: int, v: Array) -> Array:
 	else:
 		hs = [owner]
 	for h in hs:
-		if side == 0:
-			out.append([h, TOP, MID, -1, 0])
-		else:
-			out.append([h, TOP, MID - 1, -1, -1])
-			out.append([h, TOP, MID + 1, -1, 1])
+		out.append([h, TOP, MID, -1, 0])
 	return out
 
 ## 持ち主から見た「前」が、その陣地の向きで +1 か -1 か。
@@ -210,8 +209,14 @@ static func piece_targets(board: Array, i: int) -> Array:
 			if (board[t] == 0 or p_owner(board[t]) != o) and not out.has(t):
 				out.append(t)
 	for sl in slides:
+		# 道が中央で分かれることがあるので、調べる道を積んでおく
+		var rays: Array = []
 		for first in _neighbors(o, i, sl):
-			var cur: Array = first
+			rays.append([first, cell_h(i)])
+		while not rays.is_empty():
+			var ray: Array = rays.pop_back()
+			var cur: Array = ray[0]
+			var from_h: int = ray[1]
 			for _n in 30:
 				var t := _ai(cur)
 				if board[t] != 0:
@@ -221,7 +226,12 @@ static func piece_targets(board: Array, i: int) -> Array:
 				if not out.has(t):
 					out.append(t)
 				if t == CENTER:
-					break  # 中央で止まる
+					# 中央を通り抜けて、来た方向以外の5筋へ
+					for h2 in 3:
+						if h2 != from_h:
+							rays.append([[h2, TOP, MID, -1, 0], 3])
+					break
+				from_h = cur[0]
 				cur = step(cur[0], cur[1], cur[2], cur[3], cur[4])
 				if cur.is_empty():
 					break
@@ -229,7 +239,11 @@ static func piece_targets(board: Array, i: int) -> Array:
 		for a in _neighbors(o, i, [1, 0]):
 			var lands: Array = []
 			if a[0] == 3:
-				lands = center_steps(o, [1, 1])
+				for b0 in center_steps(o, [1, 0]):
+					for side in [-1, 1]:
+						var b := step(b0[0], b0[1], b0[2], b0[3], b0[3] * side)
+						if not b.is_empty():
+							lands.append(b)
 			else:
 				var s2: int = a[3]  # 1歩進んだあとの「前」の向き
 				for side in [-1, 1]:

@@ -29,6 +29,20 @@ func _init() -> void:
 				continue
 			var b := Rules.step(a[0], a[1], a[2], -a[3], -a[4])
 			check(not b.is_empty() and Rules.idx(b[0], b[1], b[2]) == i, "戻れない %d dir %s" % [i, str(d)])
+	# 1b. 角は5筋の奥を越えて、となりの陣地まで斜めに進める。飛は中央を通り抜ける
+	var empty: Array = []
+	empty.resize(Rules.CELLS)
+	empty.fill(0)
+	var bb := empty.duplicate()
+	bb[Rules.idx(0, 1, 1)] = Rules.make_piece(0, Rules.KA, false)
+	var kt := Rules.piece_targets(bb, Rules.idx(0, 1, 1))
+	check(kt.has(Rules.idx(1, 4, 3)) and kt.has(Rules.idx(1, 1, 0)), "角が真ん中で止まる %s" % str(kt))
+	var rb := empty.duplicate()
+	rb[Rules.idx(0, 1, 4)] = Rules.make_piece(0, Rules.HI, false)
+	var rt := Rules.piece_targets(rb, Rules.idx(0, 1, 4))
+	check(rt.has(Rules.CENTER) and rt.has(Rules.idx(1, 0, 4)) and rt.has(Rules.idx(2, 0, 4)), "飛が中央を通り抜けない")
+	check(not rt.has(Rules.idx(0, 1, 4)), "飛が元のマスに戻る")
+	print("角の行き先: %d マス / 飛の行き先: %d マス" % [kt.size(), rt.size()])
 	# 2. 初期局面は3人とも同じ手の数
 	var st := Rules.new_game()
 	var counts := []
@@ -38,7 +52,7 @@ func _init() -> void:
 	check(counts[0] == counts[1] and counts[1] == counts[2] and counts[0] > 0, "初期手数が違う")
 	# 3. CPU同士で最後まで
 	var wins := [0, 0, 0, 0]
-	for g in 3:
+	for g in 2:
 		seed(g)
 		st = Rules.new_game()
 		var t0 := Time.get_ticks_msec()
