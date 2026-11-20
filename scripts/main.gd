@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.10"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.11"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -38,6 +38,12 @@ var _byo_opt: OptionButton
 var _clock_row: Control
 var _clock_label: Label
 var _notice: Label   ## 対局中の通信のお知らせ（つなぎ直し中など）
+var _side_panel: Control
+var _players_box: BoxContainer
+var _help: Label
+var _buttons_row: Control
+var _lobby_vbox: Control
+var _portrait := false
 var _warned_turn_key := ""
 
 const MAIN_TIMES := [["なし", 0], ["1分", 60], ["3分", 180], ["5分", 300], ["10分", 600], ["20分", 1200]]
@@ -81,6 +87,8 @@ func _ready() -> void:
 
 	_build_lobby()
 	_build_game()
+	_apply_layout()
+	get_tree().root.size_changed.connect(_apply_layout)
 	_web_input(_name_edit, "名前を入れてください（16文字まで）")
 	_web_input(_code_edit, "部屋コードを入れてください")
 	_load_settings()
@@ -93,6 +101,42 @@ func _ready() -> void:
 	Net.message.connect(_on_net_message)
 	Net.kicked_to_title.connect(_show_lobby)
 	_handle_cmdline(args)
+
+
+## 画面の向きに合わせて並べ方を変える。
+## 縦長（スマホの縦持ち）：画面の基準を 540×960 にし、盤を上・情報を下に置く。
+func _apply_layout() -> void:
+	var ws := Vector2(DisplayServer.window_get_size())
+	if ws.x <= 0 or ws.y <= 0:
+		return
+	var portrait := ws.y > ws.x * 1.1
+	var base := Vector2i(540, 960) if portrait else Vector2i(1280, 800)
+	if get_window().content_scale_size != base:
+		get_window().content_scale_size = base
+	_portrait = portrait
+	# 実際の画面での論理的な大きさ（aspect=expand なので短い方が基準に合う）
+	var sc: float = min(ws.x / base.x, ws.y / base.y)
+	var logical := ws / sc
+
+	_game_root.vertical = portrait
+	_players_box.vertical = not portrait
+	_help.visible = not portrait
+	for pb in _player_boxes:
+		pb["hand"].visible = not portrait   # 縦画面では盤の上下の駒台で見る
+	if portrait:
+		_board.size_flags_vertical = Control.SIZE_FILL
+		_board.custom_minimum_size = Vector2(0, min(logical.x * 1.28, logical.y * 0.66))
+		_side_panel.custom_minimum_size = Vector2(0, 0)
+		_side_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_buttons_row.get_parent().move_child(_buttons_row, _players_box.get_index() + 1)
+		_lobby_vbox.custom_minimum_size = Vector2(min(480.0, logical.x - 60.0), 0)
+	else:
+		_board.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_board.custom_minimum_size = Vector2(0, 0)
+		_side_panel.custom_minimum_size = Vector2(340, 0)
+		_side_panel.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		_buttons_row.get_parent().move_child(_buttons_row, -1)
+		_lobby_vbox.custom_minimum_size = Vector2(540, 0)
 
 
 func _on_net_message(t: String) -> void:
@@ -288,6 +332,7 @@ func _build_lobby() -> void:
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 12)
 	v.custom_minimum_size = Vector2(540, 0)
+	_lobby_vbox = v
 	margin.add_child(v)
 
 	var title := Label.new()
@@ -492,7 +537,7 @@ func _show_lobby() -> void:
 # ---------- 対局画面 ----------
 
 func _build_game() -> void:
-	_game_root = HBoxContainer.new()
+	_game_root = BoxContainer.new()   # 横長なら盤｜欄、縦長なら盤／欄（_apply_layout で切り替え）
 	_game_root.set_anchors_preset(Control.PRESET_FULL_RECT)
 	add_child(_game_root)
 
@@ -507,6 +552,7 @@ func _build_game() -> void:
 
 	var side_panel := PanelContainer.new()
 	side_panel.custom_minimum_size = Vector2(340, 0)
+	_side_panel = side_panel
 	_game_root.add_child(side_panel)
 	var margin := MarginContainer.new()
 	for s in ["left", "right", "top", "bottom"]:
@@ -534,8 +580,13 @@ func _build_game() -> void:
 	tick.timeout.connect(_update_clock)
 	add_child(tick)
 
+	_players_box = BoxContainer.new()
+	_players_box.vertical = true
+	_players_box.add_theme_constant_override("separation", 6)
+	v.add_child(_players_box)
 	for p in 3:
 		var box := PanelContainer.new()
+		box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		var sb := StyleBoxFlat.new()
 		sb.bg_color = Color(0.22, 0.19, 0.16)
 		sb.border_color = BoardView.PLAYER_COLORS[p]
@@ -547,13 +598,17 @@ func _build_game() -> void:
 		box.add_child(bv)
 		var t := Label.new()
 		t.add_theme_color_override("font_color", BoardView.PLAYER_COLORS[p].lightened(0.35))
+		t.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		t.custom_minimum_size = Vector2(60, 0)
 		bv.add_child(t)
 		var clk := Label.new()
 		clk.add_theme_font_size_override("font_size", 16)
+		clk.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		clk.custom_minimum_size = Vector2(60, 0)
 		bv.add_child(clk)
 		var hand := HFlowContainer.new()
 		bv.add_child(hand)
-		v.add_child(box)
+		_players_box.add_child(box)
 		_player_boxes.append({"title": t, "hand": hand, "clock": clk})
 
 	var lg := Label.new()
@@ -570,8 +625,10 @@ func _build_game() -> void:
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help.add_theme_font_size_override("font_size", 13)
 	v.add_child(help)
+	_help = help
 
 	var hb := HBoxContainer.new()
+	_buttons_row = hb
 	_undo_btn = _btn("待った", func(): Net.undo())
 	_undo_btn.tooltip_text = "いま指した手を取り消す（次の人が指す前・手番ごとに1回まで）"
 	hb.add_child(_undo_btn)

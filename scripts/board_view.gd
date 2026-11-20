@@ -105,9 +105,28 @@ func _pt(h: int, u: float, v: float) -> Vector2:
 	return back.lerp(inner, v / 5.0)
 
 
+## 駒台1つ分の [マスの大きさ, 横の間隔, 幅, 高さ]
+func _hand_metrics() -> Array:
+	var base: float = size.x * 0.075 if _is_tall() else size.y * 0.05
+	var slot: float = clamp(base, 22.0, 40.0)
+	var step_x := slot * 1.25
+	return [slot, step_x, step_x * 4 + 12.0, 24.0 + slot * 2 + 10.0]
+
+
+## 縦長（スマホの縦画面など）のときは、駒台を盤の上下に置く
+func _is_tall() -> bool:
+	return size.y > size.x * 1.15
+
+
 func _rebuild() -> void:
-	_center = size * 0.5
-	_radius = min(size.x / 2.0, size.y / 1.732) * 0.90
+	if _is_tall():
+		var band: float = _hand_metrics()[3] + 6.0
+		var area_h := size.y - band * 2.0
+		_center = Vector2(size.x * 0.5, band + area_h * 0.5)
+		_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
+	else:
+		_center = size * 0.5
+		_radius = min(size.x / 2.0, size.y / 1.732) * 0.90
 	_polys.clear()
 	_centers.clear()
 	_sizes.clear()
@@ -219,12 +238,13 @@ func _draw_piece(pos: Vector2, rot: float, sz: float, c: int, label := "") -> vo
 ## 盤の四隅の空きに駒台を描く。下の人＝右下、右上の辺の人＝右上、左上の辺の人＝左上。
 func _draw_hands() -> void:
 	_hand_hits.clear()
-	var slot: float = clamp(size.y * 0.05, 24.0, 40.0)
+	var hm := _hand_metrics()
+	var slot: float = hm[0]
 	var cols := 4
-	var step_x := slot * 1.25
-	var w := step_x * cols + 12.0
+	var step_x: float = hm[1]
+	var w: float = hm[2]
 	var title_h := 24.0
-	var h := title_h + slot * 2 + 10.0
+	var h: float = hm[3]
 	var spots := {
 		view_seat: Vector2(size.x - w - 6, size.y - h - 6),
 		(view_seat + 1) % 3: Vector2(size.x - w - 6, 6),
