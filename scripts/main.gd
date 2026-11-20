@@ -142,6 +142,10 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 		elif a.begins_with("--join-room="):
 			_code_edit.text = a.substr(12)
 			_on_join()
+		elif a == "--create-room":
+			_on_create()
+	if DisplayServer.get_name() == "headless":
+		Net.message.connect(func(t): print("[%s] %s" % [_player_name(), t]))
 	if _start_when > 0:
 		Net.room_changed.connect(func():
 			if Net.is_owner() and not Net.in_game and Net.members.size() >= _start_when:
