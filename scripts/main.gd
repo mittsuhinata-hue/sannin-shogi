@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.12"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.13"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -621,7 +621,7 @@ func _build_game() -> void:
 	v.add_child(_log)
 
 	var help := Label.new()
-	help.text = "駒をクリック→緑のマスへ。持ち駒は駒台（右下）の駒を押してから打つ。右クリックで選択解除"
+	help.text = "駒をクリック→緑のマスへ。持ち駒は駒台（右下）の駒を押してから打つ。ホイールで拡大、ドラッグで移動、右クリックで選択解除"
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help.add_theme_font_size_override("font_size", 13)
 	v.add_child(help)

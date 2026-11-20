@@ -30,11 +30,70 @@ var _center := Vector2.ZERO
 var _radius := 100.0
 var _hand_hits: Array = []  ## [Rect2, 席, 駒の種類]
 
+# ---- 拡大・移動 ----
+const ZOOM_MIN := 1.0
+const ZOOM_MAX := 3.0
+const DRAG_START := 10.0   ## これ以上指やマウスが動いたら「なぞる」扱い（駒は選ばない）
+var _zoom := 1.0
+var _pan := Vector2.ZERO
+var _base_center := Vector2.ZERO
+var _base_radius := 100.0
+var _zoom_bar: HBoxContainer
+var _press_pos := Vector2.ZERO
+var _mouse_down := false
+var _dragging := false
+var _touches := {}          ## 指の番号 → 位置（2本指でつまむ操作に使う）
+var _pinch_dist := 0.0
+var _pinch_mid := Vector2.ZERO
+var _no_click_until := 0    ## つまむ操作の直後は、離した指で駒を選ばない
+
 
 func _ready() -> void:
 	_font = preload("res://scripts/ui_font.gd").make(true)
 	mouse_filter = Control.MOUSE_FILTER_STOP
+	clip_contents = true
+	_build_zoom_bar()
 	resized.connect(_rebuild)
+	_rebuild()
+
+
+func _build_zoom_bar() -> void:
+	_zoom_bar = HBoxContainer.new()
+	_zoom_bar.add_theme_constant_override("separation", 4)
+	for item in [["＋", func(): _zoom_at(_center, 1.35)], ["－", func(): _zoom_at(_center, 1.0 / 1.35)], ["全体", reset_zoom]]:
+		var b := Button.new()
+		b.text = item[0]
+		b.custom_minimum_size = Vector2(44, 40)
+		b.focus_mode = Control.FOCUS_NONE
+		b.add_theme_font_size_override("font_size", 20)
+		b.pressed.connect(item[1])
+		_zoom_bar.add_child(b)
+	add_child(_zoom_bar)
+	_zoom_bar.size = _zoom_bar.get_combined_minimum_size()
+
+
+func reset_zoom() -> void:
+	_zoom = 1.0
+	_pan = Vector2.ZERO
+	_rebuild()
+
+
+## 画面の点 p を中心に、factor 倍に拡大する（p の下にあるマスは動かない）
+func _zoom_at(p: Vector2, factor: float) -> void:
+	var nz: float = clamp(_zoom * factor, ZOOM_MIN, ZOOM_MAX)
+	if is_equal_approx(nz, _zoom):
+		return
+	var q := (p - _center) / _radius
+	_zoom = nz
+	var new_center := p - q * (_base_radius * _zoom)
+	_pan = new_center - _base_center
+	_rebuild()
+
+
+func _pan_by(d: Vector2) -> void:
+	if _zoom <= 1.001:
+		return
+	_pan += d
 	_rebuild()
 
 
@@ -122,11 +181,19 @@ func _rebuild() -> void:
 	if _is_tall():
 		var band: float = _hand_metrics()[3] + 6.0
 		var area_h := size.y - band * 2.0
-		_center = Vector2(size.x * 0.5, band + area_h * 0.5)
-		_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
+		_base_center = Vector2(size.x * 0.5, band + area_h * 0.5)
+		_base_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
 	else:
-		_center = size * 0.5
-		_radius = min(size.x / 2.0, size.y / 1.732) * 0.90
+		_base_center = size * 0.5
+		_base_radius = min(size.x / 2.0, size.y / 1.732) * 0.90
+	# 拡大・移動を反映（はみ出しすぎないように動かせる範囲を決める）
+	var lim: float = _base_radius * (_zoom - 1.0)
+	_pan.x = clamp(_pan.x, -lim, lim)
+	_pan.y = clamp(_pan.y, -lim * 0.9, lim * 0.9)
+	_center = _base_center + _pan
+	_radius = _base_radius * _zoom
+	if _zoom_bar:
+		_zoom_bar.position = Vector2(6, size.y - _zoom_bar.size.y - 6)
 	_polys.clear()
 	_centers.clear()
 	_sizes.clear()
@@ -291,43 +358,107 @@ func _cell_at(p: Vector2) -> int:
 
 
 func _gui_input(event: InputEvent) -> void:
-	if event is InputEventMouseButton and event.pressed:
-		if event.button_index == MOUSE_BUTTON_RIGHT:
+	# --- 2本指でつまむ（スマホ）：拡大・縮小と移動 ---
+	if event is InputEventScreenTouch:
+		if event.pressed:
+			_touches[event.index] = event.position
+			if _touches.size() == 2:
+				_start_pinch()
+		else:
+			_touches.erase(event.index)
+			if _touches.size() < 2 and _pinch_dist > 0.0:
+				_pinch_dist = 0.0
+				_no_click_until = Time.get_ticks_msec() + 400
+		return
+	if event is InputEventScreenDrag:
+		_touches[event.index] = event.position
+		if _touches.size() >= 2 and _pinch_dist > 0.0:
+			var pts: Array = _touches.values()
+			var d: float = pts[0].distance_to(pts[1])
+			var mid: Vector2 = (pts[0] + pts[1]) * 0.5
+			if d > 1.0:
+				_zoom_at(mid, d / _pinch_dist)
+			_pan_by(mid - _pinch_mid)
+			_pinch_dist = max(d, 1.0)
+			_pinch_mid = mid
+			_dragging = true
+			accept_event()
+		return
+
+	# --- マウス（スマホの1本指もここに届く）：ホイールで拡大、なぞって移動、軽く押して選ぶ ---
+	if event is InputEventMouseButton:
+		if event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_zoom_at(event.position, 1.15)
+			return
+		if event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_zoom_at(event.position, 1.0 / 1.15)
+			return
+		if event.pressed and event.button_index == MOUSE_BUTTON_RIGHT:
 			clear_selection()
 			return
 		if event.button_index != MOUSE_BUTTON_LEFT:
 			return
-		if not _can_act():
-			return
-		for hit in _hand_hits:
-			if hit[0].has_point(event.position):
-				if hit[1] == my_seat:
-					select_drop(hit[2])
-				return
-		var i := _cell_at(event.position)
-		if i < 0:
-			clear_selection()
-			return
-		var hits: Array = []
-		for m in targets:
-			if m["to"] == i:
-				hits.append(m)
-		if not hits.is_empty():
-			if hits.size() == 1:
-				move_chosen.emit(hits[0])
-			else:
-				var m_no: Dictionary = hits[0] if not hits[0]["promote"] else hits[1]
-				var m_yes: Dictionary = hits[1] if not hits[0]["promote"] else hits[0]
-				promotion_choice.emit(m_no, m_yes)
-			clear_selection()
-			return
-		var c: int = state["board"][i]
-		if c != 0 and Rules.p_owner(c) == my_seat:
-			selected_drop = -1
-			selected_from = i
-			targets = Rules.moves_from(state, my_seat, i)
-			Sfx.play("select")
-			selection_changed.emit()
-			queue_redraw()
+		if event.pressed:
+			_mouse_down = true
+			_dragging = false
+			_press_pos = event.position
 		else:
-			clear_selection()
+			var was_click := _mouse_down and not _dragging and _touches.size() < 2 \
+					and Time.get_ticks_msec() >= _no_click_until
+			_mouse_down = false
+			_dragging = false
+			if was_click:
+				_click(event.position)
+		return
+	if event is InputEventMouseMotion and _mouse_down:
+		if _touches.size() >= 2 or _pinch_dist > 0.0:
+			return
+		if not _dragging and event.position.distance_to(_press_pos) > DRAG_START:
+			_dragging = true
+		if _dragging:
+			_pan_by(event.relative)
+
+
+func _start_pinch() -> void:
+	var pts: Array = _touches.values()
+	_pinch_dist = max(pts[0].distance_to(pts[1]), 1.0)
+	_pinch_mid = (pts[0] + pts[1]) * 0.5
+	_dragging = true
+
+
+## 軽く押したとき：駒台の駒、盤の駒、行き先を選ぶ
+func _click(pos: Vector2) -> void:
+	if not _can_act():
+		return
+	for hit in _hand_hits:
+		if hit[0].has_point(pos):
+			if hit[1] == my_seat:
+				select_drop(hit[2])
+			return
+	var i := _cell_at(pos)
+	if i < 0:
+		clear_selection()
+		return
+	var hits: Array = []
+	for m in targets:
+		if m["to"] == i:
+			hits.append(m)
+	if not hits.is_empty():
+		if hits.size() == 1:
+			move_chosen.emit(hits[0])
+		else:
+			var m_no: Dictionary = hits[0] if not hits[0]["promote"] else hits[1]
+			var m_yes: Dictionary = hits[1] if not hits[0]["promote"] else hits[0]
+			promotion_choice.emit(m_no, m_yes)
+		clear_selection()
+		return
+	var c: int = state["board"][i]
+	if c != 0 and Rules.p_owner(c) == my_seat:
+		selected_drop = -1
+		selected_from = i
+		targets = Rules.moves_from(state, my_seat, i)
+		Sfx.play("select")
+		selection_changed.emit()
+		queue_redraw()
+	else:
+		clear_selection()
