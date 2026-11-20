@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.9"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.10"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -37,6 +37,7 @@ var _main_opt: OptionButton
 var _byo_opt: OptionButton
 var _clock_row: Control
 var _clock_label: Label
+var _notice: Label   ## 対局中の通信のお知らせ（つなぎ直し中など）
 var _warned_turn_key := ""
 
 const MAIN_TIMES := [["なし", 0], ["1分", 60], ["3分", 180], ["5分", 300], ["10分", 600], ["20分", 1200]]
@@ -89,9 +90,21 @@ func _ready() -> void:
 	Net.room_changed.connect(_on_room_changed)
 	Net.game_started.connect(_on_game_started)
 	Net.state_changed.connect(_refresh_game)
-	Net.message.connect(func(t): _status.text = t)
+	Net.message.connect(_on_net_message)
 	Net.kicked_to_title.connect(_show_lobby)
 	_handle_cmdline(args)
+
+
+func _on_net_message(t: String) -> void:
+	_status.text = t
+	if _game_root.visible:
+		# 対局中は右の欄に出す。つなぎ直せたら少しして消す
+		_notice.text = t
+		_notice.visible = true
+		if t.begins_with("つなぎ直しました"):
+			get_tree().create_timer(4.0).timeout.connect(func():
+				if _notice.text == t:
+					_notice.visible = false)
 
 
 func _run_server(args: PackedStringArray) -> void:
@@ -182,6 +195,10 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			Net.main_sec = int(a.substr(7))
 		elif a.begins_with("--byo="):
 			Net.byo_sec = int(a.substr(6))
+		elif a.begins_with("--drop-after="):
+			get_tree().create_timer(float(a.substr(13))).timeout.connect(func():
+				print("[%s] --- 通信をわざと切ります ---" % _player_name())
+				Net.simulate_drop())
 		elif a.begins_with("--quit-after-sec="):
 			get_tree().create_timer(float(a.substr(17))).timeout.connect(get_tree().quit)
 		elif a.begins_with("--start-when="):
@@ -506,6 +523,11 @@ func _build_game() -> void:
 	_clock_label = Label.new()
 	_clock_label.add_theme_font_size_override("font_size", 20)
 	v.add_child(_clock_label)
+	_notice = Label.new()
+	_notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_notice.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4))
+	_notice.visible = false
+	v.add_child(_notice)
 	var tick := Timer.new()
 	tick.wait_time = 0.25
 	tick.autostart = true
@@ -584,7 +606,12 @@ func _on_game_started() -> void:
 	_prev_move_no = 0
 	_prev_alive = 3
 	_prev_winner = -1
-	Sfx.play("start")
+	if Net.rejoined:
+		Net.rejoined = false   # つなぎ直しただけなので、開始の音は鳴らさない
+		_prev_move_no = Net.state.get("move_no", 0) if not Net.state.is_empty() else 999999
+	else:
+		_notice.visible = false
+		Sfx.play("start")
 	_refresh_game()
 
 

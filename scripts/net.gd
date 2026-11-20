@@ -21,6 +21,10 @@ const ID_CPU := 0
 const ID_LOCAL := -2
 const CPU_DELAY := 0.6
 const UNDO_WAIT := 2.0
+const HEARTBEAT := 15.0     ## 合図を送る間隔（秒）
+const KEEPALIVE := 240.0    ## サーバーが眠らないようにページを読みに行く間隔（秒）
+const ROOM_KEEP := 180.0    ## 全員切れた部屋を残しておく時間（秒）
+const RECONNECT_TRIES := 15 ## 再接続を試す回数（3秒おき）
 const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 enum Mode { NONE, ONLINE, LOCAL, SERVER }
@@ -44,6 +48,7 @@ var _local_room: Dictionary = {}
 
 var _pending: Callable    ## 接続できたらやること
 var test_rooms := false   ## サーバーのテスト用
+var rejoined := false     ## つなぎ直して席に戻った直後（開始の音を鳴らさないため）
 
 
 var main_sec := 0          ## 持ち時間（秒、0 = なし）。部屋を作った人の設定
@@ -52,12 +57,15 @@ var room_clock: Array = [0, 0]  ## いる部屋の [持ち時間, 秒読み]（�
 var _recv_time := 0.0      ## 盤面を受け取った時刻（考え中の時間の計算用）
 
 
-func _process(_dt: float) -> void:
+func _process(dt: float) -> void:
 	if mode == Mode.SERVER:
 		for code in _rooms.keys():
 			_cpu_tick(_rooms[code])
 			if _rooms.has(code):
 				_time_tick(_rooms[code])
+		_server_housekeeping(dt)
+	elif mode == Mode.ONLINE:
+		_client_housekeeping(dt)
 	elif mode == Mode.LOCAL and not _local_room.is_empty():
 		_cpu_tick(_local_room)
 		_time_tick(_local_room)
@@ -152,7 +160,7 @@ func _clean_name(n: String) -> String:
 
 
 @rpc("any_peer", "reliable")
-func _create_room(player_name: String, main: int = 0, byo: int = 0) -> void:
+func _create_room(player_name: String, main: int = 0, byo: int = 0, token: String = "") -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -160,11 +168,11 @@ func _create_room(player_name: String, main: int = 0, byo: int = 0) -> void:
 	var code := _new_code()
 	_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0,
 		"clock": [clampi(main, 0, 7200), clampi(byo, 0, 600)]}
-	_server_join(id, code, player_name)
+	_server_join(id, code, player_name, token)
 
 
 @rpc("any_peer", "reliable")
-func _join_room(code: String, player_name: String) -> void:
+func _join_room(code: String, player_name: String, token: String = "") -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -183,12 +191,15 @@ func _join_room(code: String, player_name: String) -> void:
 		_error.rpc_id(id, "部屋 %s は満員です" % code)
 		return
 	_server_leave_room(id)
-	_server_join(id, code, player_name)
+	_server_join(id, code, player_name, token)
 
 
-func _server_join(id: int, code: String, player_name: String) -> void:
+func _server_join(id: int, code: String, player_name: String, token: String = "") -> void:
 	var room: Dictionary = _rooms[code]
 	room["members"].append({"id": id, "name": _clean_name(player_name)})
+	if not room.has("tokens"):
+		room["tokens"] = {}
+	room["tokens"][id] = token.substr(0, 64)
 	_peer_room[id] = code
 	_room_info.rpc_id(id, code)
 	_send_members(room)
@@ -226,12 +237,17 @@ func _start_room() -> void:
 	var main: int = clock[0]
 	var byo: int = clock[1]
 	var seats_new: Array = []
+	var seat_tokens: Array = []
 	for i in 3:
 		if i < room["members"].size():
-			seats_new.append({"id": room["members"][i]["id"], "name": room["members"][i]["name"]})
+			var mid: int = room["members"][i]["id"]
+			seats_new.append({"id": mid, "name": room["members"][i]["name"], "base": room["members"][i]["name"]})
+			seat_tokens.append(room.get("tokens", {}).get(mid, ""))
 		else:
 			seats_new.append({"id": ID_CPU, "name": "CPU%d" % i})
+			seat_tokens.append("")
 	room["seats"] = seats_new
+	room["seat_tokens"] = seat_tokens   # 席ごとの合言葉（サーバーだけが持つ）
 	room["state"] = Rules.new_game()
 	_init_clock(room["state"], main, byo)
 	Rules.pick_first(room["state"], _seat_names(seats_new))
@@ -289,21 +305,123 @@ func _server_leave_room(id: int) -> void:
 	for i in range(room["members"].size() - 1, -1, -1):
 		if room["members"][i]["id"] == id:
 			room["members"].remove_at(i)
+	room.get("tokens", {}).erase(id)
+	if room["in_game"]:
+		# 切れた人の席はCPUが代わりに指す。同じ人が戻ってきたら席を返す
+		for s in room["seats"]:
+			if s["id"] == id:
+				s["id"] = ID_CPU
+				s["away"] = true
+				s["name"] = str(s.get("base", s["name"])) + "（切断中）"
 	if room["members"].is_empty():
-		_rooms.erase(code)
-		print("部屋 %s を閉じました" % code)
+		if room["in_game"] and room["state"].get("winner", -1) < 0:
+			room["empty_since"] = _now()   # しばらくは部屋を残して、戻ってくるのを待つ
+			print("部屋 %s：全員切断。戻りを待ちます" % code)
+		else:
+			_rooms.erase(code)
+			print("部屋 %s を閉じました" % code)
 		return
 	if room["owner"] == id:
 		room["owner"] = room["members"][0]["id"]
 	if room["in_game"]:
-		for s in room["seats"]:
-			if s["id"] == id:
-				s["id"] = ID_CPU
-				s["name"] = str(s["name"]) + "（切断→CPU）"
 		for m in room["members"]:
 			_seats_update.rpc_id(m["id"], room["seats"])
 		_push(room)
 	_send_members(room)
+
+
+## 切れた人が戻ってきた：合言葉（token）が合う席に戻す
+@rpc("any_peer", "reliable")
+func _rejoin(code: String, token: String, player_name: String) -> void:
+	if mode != Mode.SERVER:
+		return
+	var id := multiplayer.get_remote_sender_id()
+	code = code.strip_edges().to_upper()
+	if not _rooms.has(code) or token == "":
+		_rejoin_failed.rpc_id(id, "サーバーが作り直されたため、この対局は終わりました")
+		return
+	var room: Dictionary = _rooms[code]
+	var seat_tokens: Array = room.get("seat_tokens", [])
+	var seat := seat_tokens.find(token)
+	if seat < 0 or not room["in_game"]:
+		_rejoin_failed.rpc_id(id, "この対局には戻れませんでした")
+		return
+	var s: Dictionary = room["seats"][seat]
+	s["id"] = id
+	s["away"] = false
+	s["name"] = str(s.get("base", _clean_name(player_name)))
+	room["members"].append({"id": id, "name": s["name"]})
+	room["tokens"][id] = token
+	room.erase("empty_since")
+	if not room["members"].any(func(m): return m["id"] == room["owner"]):
+		room["owner"] = room["members"][0]["id"]
+	_peer_room[id] = code
+	_room_info.rpc_id(id, code)
+	_begin.rpc_id(id, room["seats"])
+	for m in room["members"]:
+		if m["id"] != id:
+			_seats_update.rpc_id(m["id"], room["seats"])
+	_send_members(room)
+	_push(room)
+	print("部屋 %s：席%d に戻りました" % [code, seat])
+
+
+@rpc("authority", "reliable")
+func _rejoin_failed(text: String) -> void:
+	leave()
+	message.emit(text)
+	kicked_to_title.emit()
+
+
+## つながっていることを伝える小さな合図（途中の機器に切られないように）
+@rpc("any_peer", "unreliable")
+func _hb_up() -> void:
+	pass
+
+
+@rpc("authority", "unreliable")
+func _hb_down() -> void:
+	pass
+
+
+var _hb_accum := 0.0
+var _keepalive_accum := 0.0
+var _http: HTTPRequest
+
+## サーバー：合図を送り、だれも戻ってこない部屋を片づける
+func _server_housekeeping(dt: float) -> void:
+	_hb_accum += dt
+	if _hb_accum < HEARTBEAT:
+		return
+	_hb_accum = 0.0
+	for id in _peer_room.keys():
+		_hb_down.rpc_id(id)
+	for code in _rooms.keys():
+		var room: Dictionary = _rooms[code]
+		if room.has("empty_since") and _now() - room["empty_since"] > ROOM_KEEP:
+			_rooms.erase(code)
+			print("部屋 %s：だれも戻らないので閉じました" % code)
+
+
+## プレイヤー：合図を送り、サーバーが眠らないようにページを読みに行く
+func _client_housekeeping(dt: float) -> void:
+	if multiplayer.multiplayer_peer == null \
+			or multiplayer.multiplayer_peer.get_connection_status() != MultiplayerPeer.CONNECTION_CONNECTED:
+		return
+	_hb_accum += dt
+	if _hb_accum >= HEARTBEAT:
+		_hb_accum = 0.0
+		_hb_up.rpc_id(1)
+	_keepalive_accum += dt
+	if _keepalive_accum >= KEEPALIVE and room_code != "":
+		_keepalive_accum = 0.0
+		var http_url := _last_url.replace("wss://", "https://").replace("ws://", "http://")
+		if _http == null:
+			_http = HTTPRequest.new()
+			_http.timeout = 30.0
+			add_child(_http)
+		_http.cancel_request()
+		_http.request(http_url + "/")
 
 
 func _room_of(id: int) -> Dictionary:
@@ -406,6 +524,9 @@ func _cpu_tick(room: Dictionary) -> void:
 	var t: int = st["turn"]
 	if room["seats"][t]["id"] != ID_CPU:
 		return
+	if mode == Mode.SERVER and room["members"].is_empty():
+		room["cpu_at"] = _now() + 2.0   # 全員切れている間は進めずに待つ
+		return
 	var m := Rules.cpu_choose(st, t)
 	if m.is_empty():
 		Rules.resign(st, t)
@@ -424,26 +545,40 @@ func _cpu_tick(room: Dictionary) -> void:
 #  プレイヤー側
 # =====================================================================
 
+var _token := ""            ## 自分の席に戻るための合言葉（この画面を開いている間だけ）
+var _last_url := ""
+var _reconnecting := false
+var _reconnect_tries := 0
+
+
 func _connect(url: String, then: Callable) -> void:
 	leave()
-	var p := WebSocketMultiplayerPeer.new()
-	var err := p.create_client(url)
-	if err != OK:
-		message.emit("接続を始められませんでした（エラー %d）" % err)
+	_token = "%08x%08x%08x" % [randi(), randi(), randi()]
+	_last_url = url
+	if not _open_peer(url):
 		return
-	multiplayer.multiplayer_peer = p
-	if not multiplayer.connected_to_server.is_connected(_on_connected):
-		multiplayer.connected_to_server.connect(_on_connected)
-		multiplayer.connection_failed.connect(_on_failed)
-		multiplayer.server_disconnected.connect(_on_server_gone)
 	mode = Mode.ONLINE
 	_pending = then
 	message.emit("サーバーに接続中…（しばらく使われていないと、起きるまで1分ほどかかります）")
 
 
+func _open_peer(url: String) -> bool:
+	var p := WebSocketMultiplayerPeer.new()
+	var err := p.create_client(url)
+	if err != OK:
+		message.emit("接続を始められませんでした（エラー %d）" % err)
+		return false
+	multiplayer.multiplayer_peer = p
+	if not multiplayer.connected_to_server.is_connected(_on_connected):
+		multiplayer.connected_to_server.connect(_on_connected)
+		multiplayer.connection_failed.connect(_on_failed)
+		multiplayer.server_disconnected.connect(_on_server_gone)
+	return true
+
+
 func create_room(url: String, player_name: String) -> void:
 	my_name = player_name
-	_connect(url, func(): _create_room.rpc_id(1, my_name, main_sec, byo_sec))
+	_connect(url, func(): _create_room.rpc_id(1, my_name, main_sec, byo_sec, _token))
 
 
 func join_room(url: String, code: String, player_name: String) -> void:
@@ -452,7 +587,39 @@ func join_room(url: String, code: String, player_name: String) -> void:
 	if c == "":
 		message.emit("部屋コードを入れてください")
 		return
-	_connect(url, func(): _join_room.rpc_id(1, c, my_name))
+	_connect(url, func(): _join_room.rpc_id(1, c, my_name, _token))
+
+
+## テスト用：通信がいきなり切れたことにする
+func simulate_drop() -> void:
+	if multiplayer.multiplayer_peer and not (multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
+		multiplayer.multiplayer_peer.close()
+	_on_server_gone()
+
+
+## 対局中に切れたら、自動でつなぎ直して元の席に戻る
+func _can_reconnect() -> bool:
+	return in_game and room_code != "" and _token != "" and not state.is_empty() and state["winner"] < 0
+
+
+func _try_reconnect() -> void:
+	if mode != Mode.ONLINE or not _reconnecting:
+		return
+	_reconnect_tries += 1
+	if _reconnect_tries > RECONNECT_TRIES:
+		_reconnecting = false
+		leave()
+		message.emit("サーバーにつなぎ直せませんでした")
+		kicked_to_title.emit()
+		return
+	message.emit("接続が切れました。つなぎ直しています…（%d回目）" % _reconnect_tries)
+	if multiplayer.multiplayer_peer and not (multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
+		multiplayer.multiplayer_peer.close()
+	if not _open_peer(_last_url):
+		get_tree().create_timer(3.0).timeout.connect(_try_reconnect)
+		return
+	var code := room_code
+	_pending = func(): _rejoin.rpc_id(1, code, _token, my_name)
 
 
 func start_game() -> void:
@@ -469,13 +636,18 @@ func start_game() -> void:
 func _on_connected() -> void:
 	if mode != Mode.ONLINE:
 		return
-	message.emit("接続しました")
+	if not _reconnecting:
+		message.emit("接続しました")
+	_hb_accum = 0.0
 	if _pending.is_valid():
 		_pending.call()
 
 
 func _on_failed() -> void:
 	if mode != Mode.ONLINE:
+		return
+	if _reconnecting:
+		get_tree().create_timer(3.0).timeout.connect(_try_reconnect)
 		return
 	leave()
 	message.emit("サーバーにつながりませんでした。少し待ってからもう一度押してください")
@@ -484,6 +656,12 @@ func _on_failed() -> void:
 
 func _on_server_gone() -> void:
 	if mode != Mode.ONLINE:
+		return
+	if _reconnecting or _can_reconnect():
+		if not _reconnecting:
+			_reconnecting = true
+			_reconnect_tries = 0
+		get_tree().create_timer(1.0).timeout.connect(_try_reconnect)
 		return
 	leave()
 	message.emit("サーバーとの接続が切れました")
@@ -521,6 +699,10 @@ func _error(text: String) -> void:
 
 @rpc("authority", "reliable")
 func _begin(s: Array) -> void:
+	if _reconnecting:
+		_reconnecting = false
+		rejoined = true
+		message.emit("つなぎ直しました。続きから指せます")
 	seats = s
 	my_seat = -1
 	var me := multiplayer.get_unique_id()
@@ -586,6 +768,8 @@ func leave() -> void:
 	_rooms = {}
 	_peer_room = {}
 	_pending = Callable()
+	_reconnecting = false
+	_token = ""
 
 
 ## いまこの端末で動かせる席（なければ -1）
