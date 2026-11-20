@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.11"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.12"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -122,7 +122,7 @@ func _apply_layout() -> void:
 	_players_box.vertical = not portrait
 	_help.visible = not portrait
 	for pb in _player_boxes:
-		pb["hand"].visible = not portrait   # 縦画面では盤の上下の駒台で見る
+		pb["hand"].visible = false   # 持ち駒は盤の駒台で見る（枠の中には出さない）
 	if portrait:
 		_board.size_flags_vertical = Control.SIZE_FILL
 		_board.custom_minimum_size = Vector2(0, min(logical.x * 1.28, logical.y * 0.66))
@@ -621,7 +621,7 @@ func _build_game() -> void:
 	v.add_child(_log)
 
 	var help := Label.new()
-	help.text = "駒をクリック→緑のマスへ。持ち駒は駒台（右下）かボタンを押してから打つ。右クリックで選択解除"
+	help.text = "駒をクリック→緑のマスへ。持ち駒は駒台（右下）の駒を押してから打つ。右クリックで選択解除"
 	help.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	help.add_theme_font_size_override("font_size", 13)
 	v.add_child(help)
