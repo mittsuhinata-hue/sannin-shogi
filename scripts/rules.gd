@@ -390,8 +390,28 @@ static func drops_of(state: Dictionary, pl: int, kind: int) -> Array:
 		var m := {"from": -1, "to": t, "drop": kind, "promote": false}
 		if checked and not _safe(state, pl, m):
 			continue
+		if kind == FU and _pawn_drop_mate(state, pl, t):
+			continue
 		out.append(m)
 	return out
+
+
+## 打ち歩詰め：歩を打って王手をかけた相手が、どう指しても逃げられなくなるか
+static func _pawn_drop_mate(state: Dictionary, pl: int, t: int) -> bool:
+	var b: Array = state["board"].duplicate()
+	b[t] = make_piece(pl, FU, false)
+	var hit := piece_targets(b, t)
+	for o in 3:
+		if o == pl or not state["alive"][o]:
+			continue
+		var k := find_king(b, o)
+		if k < 0 or not hit.has(k):
+			continue
+		var s2 := {"board": b, "hands": state["hands"].duplicate(true), "alive": state["alive"]}
+		s2["hands"][pl][FU] -= 1
+		if not has_legal_move(s2, o):
+			return true
+	return false
 
 static func legal_moves(state: Dictionary, pl: int) -> Array:
 	var out: Array = []

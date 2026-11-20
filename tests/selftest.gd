@@ -64,6 +64,29 @@ func _init() -> void:
 	Rules.apply_move(cs, em)
 	check(cs["turn"] == 0, "王手のあとの順番がちがう（turn=%d）" % cs["turn"])
 	print("王手の順番: ", cs["log"])
+	# 1d. 打ち歩詰め：緑の玉を隅に追い詰め、赤が歩を打って詰ませる手は打てない
+	var us := Rules.new_game()
+	var ub: Array = empty.duplicate()
+	ub[Rules.idx(0, 0, 4)] = Rules.make_piece(0, Rules.OU, false)
+	ub[Rules.idx(1, 0, 4)] = Rules.make_piece(1, Rules.OU, false)
+	ub[Rules.idx(2, 0, 0)] = Rules.make_piece(2, Rules.OU, false)
+	ub[Rules.idx(2, 2, 0)] = Rules.make_piece(0, Rules.KI, false)  # 歩を守り、逃げ道もふさぐ
+	ub[Rules.idx(2, 1, 2)] = Rules.make_piece(0, Rules.GI, false)  # 横の逃げ道をふさぐ
+	us["board"] = ub
+	us["turn"] = 0
+	us["hands"][0][Rules.FU] = 1
+	var mate_cell := Rules.idx(2, 1, 0)
+	var drop_cells: Array = []
+	for x in Rules.drops_of(us, 0, Rules.FU):
+		drop_cells.append(x["to"])
+	check(not drop_cells.has(mate_cell), "打ち歩詰めの場所に打ててしまう")
+	check(drop_cells.has(Rules.idx(2, 3, 5)), "ふつうの場所に歩が打てない")
+	ub[Rules.idx(2, 2, 0)] = 0  # 守りの金がなければ玉で歩を取れるので打てる
+	ub[Rules.idx(2, 3, 1)] = Rules.make_piece(0, Rules.KY, false)  # 香で逃げ道だけふさぐ（歩は守らない）
+	drop_cells.clear()
+	for x in Rules.drops_of(us, 0, Rules.FU):
+		drop_cells.append(x["to"])
+	check(drop_cells.has(mate_cell), "詰まない歩打ちまで禁止されている")
 	# 2. 初期局面は3人とも同じ手の数
 	var st := Rules.new_game()
 	var counts := []
