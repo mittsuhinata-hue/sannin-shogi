@@ -87,6 +87,49 @@ func _init() -> void:
 	for x in Rules.drops_of(us, 0, Rules.FU):
 		drop_cells.append(x["to"])
 	check(drop_cells.has(mate_cell), "詰まない歩打ちまで禁止されている")
+	# 1e. 千日手：3人とも玉を行ったり来たりすると引き分け
+	var ss := Rules.new_game()
+	var sb: Array = empty.duplicate()
+	for p in 3:
+		sb[Rules.idx(p, 0, 4)] = Rules.make_piece(p, Rules.OU, false)
+	ss["board"] = sb
+	ss["turn"] = 0
+	for _n in 40:
+		if ss["winner"] >= 0:
+			break
+		var t: int = ss["turn"]
+		var k := Rules.find_king(ss["board"], t)
+		var dest := Rules.idx(t, 1, 4) if Rules.cell_r(k) == 0 else Rules.idx(t, 0, 4)
+		Rules.apply_move(ss, {"from": k, "to": dest, "drop": -1, "promote": false})
+	check(ss["winner"] == Rules.DRAW, "千日手で引き分けにならない（winner=%d, %d手）" % [ss["winner"], ss["move_no"]])
+	print("千日手: %d手で %s" % [ss["move_no"], ss["log"][-1]])
+	# 1f. 連続王手の千日手：赤が緑に王手をかけ続けると赤の負け
+	var ps := Rules.new_game()
+	var pb: Array = empty.duplicate()
+	pb[Rules.idx(0, 0, 4)] = Rules.make_piece(0, Rules.OU, false)
+	pb[Rules.idx(1, 0, 4)] = Rules.make_piece(1, Rules.OU, false)
+	pb[Rules.idx(2, 1, 0)] = Rules.make_piece(2, Rules.OU, false)
+	pb[Rules.idx(2, 0, 5)] = Rules.make_piece(0, Rules.HI, false)
+	ps["board"] = pb
+	ps["turn"] = 0
+	for _n in 40:
+		if not ps["alive"][0] or ps["winner"] >= 0:
+			break
+		var t: int = ps["turn"]
+		if t == 0:
+			var rk := Rules.idx(2, 0, 5) if ps["board"][Rules.idx(2, 0, 5)] != 0 else Rules.idx(2, 1, 5)
+			var rd := Rules.idx(2, 1, 5) if rk == Rules.idx(2, 0, 5) else Rules.idx(2, 0, 5)
+			Rules.apply_move(ps, {"from": rk, "to": rd, "drop": -1, "promote": false})
+		elif t == 2:
+			var k := Rules.find_king(ps["board"], 2)
+			var dest := Rules.idx(2, 0, 0) if Rules.cell_r(k) == 1 else Rules.idx(2, 1, 0)
+			check(Rules.is_legal(ps, 2, {"from": k, "to": dest, "drop": -1, "promote": false}), "緑の逃げ手が指せない")
+			Rules.apply_move(ps, {"from": k, "to": dest, "drop": -1, "promote": false})
+		else:
+			check(false, "青の番になった（王手の順番がおかしい）")
+			break
+	check(not ps["alive"][0], "連続王手の千日手で赤が負けにならない")
+	print("連続王手: ", ps["log"].slice(-3))
 	# 2. 初期局面は3人とも同じ手の数
 	var st := Rules.new_game()
 	var counts := []

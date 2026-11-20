@@ -551,7 +551,61 @@ static func apply_move(state: Dictionary, m: Dictionary) -> void:
 	state["last_to"] = to
 	state["move_no"] += 1
 	state["log"].append("%s %d手目 %s" % [player_name_default(pl), state["move_no"], text])
+	var gave_check := false
+	for o in 3:
+		if o != pl and state["alive"][o] and in_check(board, o, state["alive"]):
+			gave_check = true
 	advance_turn(state)
+	if state["winner"] < 0:
+		_record_position(state, pl, gave_check)
+
+
+# ---------- 千日手 ----------
+
+static func _position_key(state: Dictionary) -> int:
+	return ("%s|%s|%d|%s" % [state["board"], state["hands"], state["turn"], state["alive"]]).hash()
+
+## 局面を覚え、同じ局面が4回目なら千日手にする。
+## その間ずっと王手をかけ続けた人がいればその人の負け、いなければ引き分け。
+static func _record_position(state: Dictionary, mover: int, gave_check: bool) -> void:
+	if not state.has("positions"):
+		state["positions"] = []
+		state["movers"] = []
+		state["checks"] = []
+	var key := _position_key(state)
+	var positions: Array = state["positions"]
+	positions.append(key)
+	state["movers"].append(mover)
+	state["checks"].append(gave_check)
+	if positions.count(key) < 4:
+		return
+	var first := positions.find(key)
+	for x in 3:
+		if not state["alive"][x]:
+			continue
+		var moved := 0
+		var all_check := true
+		for j in range(first + 1, positions.size()):
+			if state["movers"][j] == x:
+				moved += 1
+				if not state["checks"][j]:
+					all_check = false
+		if moved > 0 and all_check:
+			state["log"].append("千日手（%sの連続王手）" % player_name_default(x))
+			var was_turn: bool = state["turn"] == x
+			eliminate(state, x, "連続王手の千日手で負け")
+			_reset_positions(state)
+			if not _check_winner(state) and was_turn:
+				advance_turn(state)
+			return
+	state["winner"] = DRAW
+	state["log"].append("千日手（同じ局面が4回）で引き分け")
+
+
+static func _reset_positions(state: Dictionary) -> void:
+	state["positions"] = []
+	state["movers"] = []
+	state["checks"] = []
 
 static func resign(state: Dictionary, pl: int) -> void:
 	if not state["alive"][pl] or state["winner"] >= 0:
