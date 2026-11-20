@@ -137,6 +137,38 @@ func _init() -> void:
 		counts.append(Rules.legal_moves(st, p).size())
 	print("初期の合法手: ", counts)
 	check(counts[0] == counts[1] and counts[1] == counts[2] and counts[0] > 0, "初期手数が違う")
+	# 2b. 将棋の種類ごとに：盤の形・3人の手の数がそろうか・CPUが指し続けられるか
+	for vid in Rules.VARIANT_ORDER:
+		var vs := Rules.new_game(vid)
+		for i in Rules.CENTER:
+			for d in Rules.KING_STEPS:
+				var a := Rules.step(Rules.cell_h(i), Rules.cell_r(i), Rules.cell_f(i), d[0], d[1])
+				if a.is_empty() or a[0] == 3:
+					continue
+				var b := Rules.step(a[0], a[1], a[2], -a[3], -a[4])
+				check(not b.is_empty() and Rules.idx(b[0], b[1], b[2]) == i, "%s: 戻れない %d" % [vid, i])
+		var cnt := []
+		for p in 3:
+			cnt.append(Rules.legal_moves(vs, p).size())
+		check(cnt[0] == cnt[1] and cnt[1] == cnt[2] and cnt[0] > 0, "%s: 3人の手の数が違う %s" % [vid, str(cnt)])
+		var pieces := 0
+		for c in vs["board"]:
+			if c != 0:
+				pieces += 1
+		var t0 := Time.get_ticks_msec()
+		var worst := 0
+		var n := 0
+		while vs["winner"] < 0 and n < 60:
+			var t1 := Time.get_ticks_msec()
+			var m := Rules.cpu_choose(vs, vs["turn"])
+			worst = max(worst, Time.get_ticks_msec() - t1)
+			if m.is_empty():
+				break
+			check(Rules.is_legal(vs, vs["turn"], m), "%s: CPUの手が不正 %s" % [vid, str(m)])
+			Rules.apply_move(vs, m)
+			n += 1
+		print("%s: マス%d 駒%d 初手の数%s 60手 %dms（1手最大%dms） 最後=%s" % [vid, Rules.CELLS, pieces, str(cnt), Time.get_ticks_msec() - t0, worst, vs["log"][-1]])
+	Rules.set_variant("standard")
 	# 3. CPU同士で最後まで
 	var wins := [0, 0, 0, 0]
 	for g in 2:

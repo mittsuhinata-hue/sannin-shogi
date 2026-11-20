@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.13"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.0"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -35,6 +35,9 @@ var _resign_btn: Button
 var _undo_btn: Button
 var _main_opt: OptionButton
 var _byo_opt: OptionButton
+var _variant_opt: OptionButton
+var _variant_note: Label
+var _piece_info: Label
 var _clock_row: Control
 var _clock_label: Label
 var _notice: Label   ## 対局中の通信のお知らせ（つなぎ直し中など）
@@ -50,7 +53,7 @@ const MAIN_TIMES := [["なし", 0], ["1分", 60], ["3分", 180], ["5分", 300], 
 const BYO_TIMES := [["なし", 0], ["10秒", 10], ["20秒", 20], ["30秒", 30], ["60秒", 60]]
 
 
-## 部屋の設定 [持ち時間, 秒読み] を欄に表示する
+## 部屋の設定 [持ち時間, 秒読み, 種類] を欄に表示する
 func _select_clock(clock: Array) -> void:
 	for i in MAIN_TIMES.size():
 		if MAIN_TIMES[i][1] == int(clock[0]):
@@ -58,11 +61,18 @@ func _select_clock(clock: Array) -> void:
 	for i in BYO_TIMES.size():
 		if BYO_TIMES[i][1] == int(clock[1]):
 			_byo_opt.selected = i
+	if clock.size() > 2:
+		var vi := Rules.VARIANT_ORDER.find(str(clock[2]))
+		if vi >= 0:
+			_variant_opt.selected = vi
+	_variant_note.text = Rules.VARIANTS[Rules.VARIANT_ORDER[_variant_opt.selected]]["note"]
 
 
 func _apply_clock_setting() -> void:
 	Net.main_sec = MAIN_TIMES[_main_opt.selected][1]
 	Net.byo_sec = BYO_TIMES[_byo_opt.selected][1]
+	Net.variant_id = Rules.VARIANT_ORDER[_variant_opt.selected]
+	_variant_note.text = Rules.VARIANTS[Net.variant_id]["note"]
 var _promo: ConfirmationDialog
 var _promo_moves: Array = []
 
@@ -171,6 +181,7 @@ func _load_settings() -> void:
 		_server_edit.text = cf.get_value("main", "server", Net.DEFAULT_SERVER)
 		_main_opt.selected = clampi(cf.get_value("main", "main_index", 0), 0, MAIN_TIMES.size() - 1)
 		_byo_opt.selected = clampi(cf.get_value("main", "byo_index", 0), 0, BYO_TIMES.size() - 1)
+		_variant_opt.selected = clampi(cf.get_value("main", "variant_index", 0), 0, Rules.VARIANT_ORDER.size() - 1)
 	_apply_clock_setting()
 
 
@@ -180,6 +191,7 @@ func _save_settings() -> void:
 	cf.set_value("main", "server", _server_url())
 	cf.set_value("main", "main_index", _main_opt.selected)
 	cf.set_value("main", "byo_index", _byo_opt.selected)
+	cf.set_value("main", "variant_index", _variant_opt.selected)
 	cf.save(SETTINGS_PATH)
 
 
@@ -235,6 +247,8 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_server_edit.text = a.substr(13)
 		elif a == "--auto":
 			_auto = true
+		elif a.begins_with("--variant="):
+			Net.variant_id = a.substr(10)
 		elif a.begins_with("--main="):
 			Net.main_sec = int(a.substr(7))
 		elif a.begins_with("--byo="):
@@ -371,8 +385,24 @@ func _build_lobby() -> void:
 	th_row.add_child(_byo_opt)
 	_main_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_byo_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	# 将棋の種類
+	_variant_opt = OptionButton.new()
+	for vid in Rules.VARIANT_ORDER:
+		_variant_opt.add_item(Rules.VARIANTS[vid]["name"])
+	_variant_opt.item_selected.connect(func(_i):
+		_apply_clock_setting()
+		Net.set_clock(Net.main_sec, Net.byo_sec)
+		_save_settings())
+	_variant_note = Label.new()
+	_variant_note.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_variant_note.add_theme_font_size_override("font_size", 14)
+	_variant_note.modulate = Color(1, 1, 1, 0.75)
 	# 部屋に入る前は「部屋を作る」ボタンの上、入ったあとは部屋の画面に置く（_show_lobby で移す）
-	_clock_row = _row("持ち時間", th_row)
+	var rules_box := VBoxContainer.new()
+	rules_box.add_child(_row("種類", _variant_opt))
+	rules_box.add_child(_variant_note)
+	rules_box.add_child(_row("持ち時間", th_row))
+	_clock_row = rules_box
 
 	# --- 部屋に入る前 ---
 	var entry := VBoxContainer.new()
@@ -527,9 +557,10 @@ func _show_lobby() -> void:
 	if in_room:
 		_select_clock(Net.room_clock)
 	else:
-		_select_clock([Net.main_sec, Net.byo_sec])
+		_select_clock([Net.main_sec, Net.byo_sec, Net.variant_id])
 	_main_opt.disabled = in_room and not Net.is_owner()
 	_byo_opt.disabled = _main_opt.disabled
+	_variant_opt.disabled = _main_opt.disabled
 	_copy_btn.text = "招待リンクをコピー" if OS.has_feature("web") else "部屋コードをコピー"
 
 
@@ -549,6 +580,7 @@ func _build_game() -> void:
 	_board.move_chosen.connect(func(m): Net.submit_move(m))
 	_board.promotion_choice.connect(_ask_promotion)
 	_board.selection_changed.connect(_refresh_hands)
+	_board.piece_tapped.connect(func(c): _piece_info.text = Rules.piece_help(c))
 
 	var side_panel := PanelContainer.new()
 	side_panel.custom_minimum_size = Vector2(340, 0)
@@ -569,6 +601,12 @@ func _build_game() -> void:
 	_clock_label = Label.new()
 	_clock_label.add_theme_font_size_override("font_size", 20)
 	v.add_child(_clock_label)
+	_piece_info = Label.new()
+	_piece_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_piece_info.add_theme_font_size_override("font_size", 15)
+	_piece_info.add_theme_color_override("font_color", Color(0.75, 0.95, 1.0))
+	_piece_info.custom_minimum_size = Vector2(60, 0)
+	v.add_child(_piece_info)
 	_notice = Label.new()
 	_notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_notice.add_theme_color_override("font_color", Color(1.0, 0.85, 0.4))
@@ -668,6 +706,7 @@ func _on_game_started() -> void:
 		_prev_move_no = Net.state.get("move_no", 0) if not Net.state.is_empty() else 999999
 	else:
 		_notice.visible = false
+		_piece_info.text = "駒を押すと、名前と動きがここに出ます"
 		Sfx.play("start")
 	_refresh_game()
 

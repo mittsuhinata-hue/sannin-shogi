@@ -6,6 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 signal move_chosen(m: Dictionary)
 signal promotion_choice(m_no: Dictionary, m_yes: Dictionary)
 signal selection_changed
+signal piece_tapped(c: int)
 
 const PLAYER_COLORS := [Color(0.80, 0.15, 0.15), Color(0.15, 0.30, 0.85), Color(0.10, 0.55, 0.20)]
 const HALF_TINT := [Color(0.93, 0.80, 0.60), Color(0.88, 0.80, 0.66), Color(0.90, 0.84, 0.62)]
@@ -36,6 +37,7 @@ const ZOOM_MAX := 3.0
 const DRAG_START := 10.0   ## これ以上指やマウスが動いたら「なぞる」扱い（駒は選ばない）
 var _zoom := 1.0
 var _pan := Vector2.ZERO
+var _drawn_variant := ""
 var _base_center := Vector2.ZERO
 var _base_radius := 100.0
 var _zoom_bar: HBoxContainer
@@ -80,7 +82,8 @@ func reset_zoom() -> void:
 
 ## 画面の点 p を中心に、factor 倍に拡大する（p の下にあるマスは動かない）
 func _zoom_at(p: Vector2, factor: float) -> void:
-	var nz: float = clamp(_zoom * factor, ZOOM_MIN, ZOOM_MAX)
+	var zmax: float = Rules.variant_info().get("zoom", ZOOM_MAX)
+	var nz: float = clamp(_zoom * factor, ZOOM_MIN, zmax)
 	if is_equal_approx(nz, _zoom):
 		return
 	var q := (p - _center) / _radius
@@ -99,6 +102,14 @@ func _pan_by(d: Vector2) -> void:
 
 func set_state(s: Dictionary) -> void:
 	state = s
+	var vid := str(s.get("variant", "standard"))
+	if vid != _drawn_variant:
+		# 種類が変わったら盤の形を作り直し、拡大も戻す
+		_drawn_variant = vid
+		Rules.use(s)
+		_zoom = 1.0
+		_pan = Vector2.ZERO
+		_rebuild()
 	clear_selection()
 	queue_redraw()
 
@@ -145,23 +156,26 @@ func _hex_v(j: int) -> Vector2:
 func _hex_m(j: int) -> Vector2:
 	return (_hex_v(j) + _hex_v(j + 1)) * 0.5
 
-## 中央の三角形の頂点（h と h+1 の境目の上）
+## 中央の三角形の頂点（h と h+1 の境目の上）。真ん中の筋の幅がほかの筋とそろう大きさにする
 func _q(h: int) -> Vector2:
 	var m := _hex_m(2 * posmod(h, 3) + 1)
-	return _center + (m - _center).normalized() * _radius * 0.11
+	var d := _radius * 0.866 / (1.732 * Rules.MID + 1.0)
+	return _center + (m - _center).normalized() * d
 
-## 陣地 h の (筋u, 段v) 座標 → 画面上の点。u:0..9, v:0..5
+## 陣地 h の (筋u, 段v) 座標 → 画面上の点。u:0..FILES, v:0..RANKS
 func _pt(h: int, u: float, v: float) -> Vector2:
 	var k := 2 * h
-	var back := _hex_v(k).lerp(_hex_v(k + 1), u / 9.0)
+	var files := float(Rules.FILES)
+	var mid := float(Rules.MID)
+	var back := _hex_v(k).lerp(_hex_v(k + 1), u / files)
 	var inner: Vector2
-	if u <= 4.0:
-		inner = _hex_m(k - 1).lerp(_q(h - 1), u / 4.0)
-	elif u <= 5.0:
-		inner = _q(h - 1).lerp(_q(h), u - 4.0)
+	if u <= mid:
+		inner = _hex_m(k - 1).lerp(_q(h - 1), u / mid)
+	elif u <= mid + 1.0:
+		inner = _q(h - 1).lerp(_q(h), u - mid)
 	else:
-		inner = _q(h).lerp(_hex_m(k + 1), (u - 5.0) / 4.0)
-	return back.lerp(inner, v / 5.0)
+		inner = _q(h).lerp(_hex_m(k + 1), (u - mid - 1.0) / mid)
+	return back.lerp(inner, v / float(Rules.RANKS))
 
 
 ## 駒台1つ分の [マスの大きさ, 横の間隔, 幅, 高さ]
@@ -178,14 +192,14 @@ func _is_tall() -> bool:
 
 
 func _rebuild() -> void:
-	if _is_tall():
+	if _is_tall() and Rules.DROPS:
 		var band: float = _hand_metrics()[3] + 6.0
 		var area_h := size.y - band * 2.0
 		_base_center = Vector2(size.x * 0.5, band + area_h * 0.5)
 		_base_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
 	else:
 		_base_center = size * 0.5
-		_base_radius = min(size.x / 2.0, size.y / 1.732) * 0.90
+		_base_radius = min(size.x / 2.0, size.y / 1.732) * (0.90 if Rules.DROPS else 0.97)
 	# 拡大・移動を反映（はみ出しすぎないように動かせる範囲を決める）
 	var lim: float = _base_radius * (_zoom - 1.0)
 	_pan.x = clamp(_pan.x, -lim, lim)
@@ -312,6 +326,10 @@ func _draw_hands() -> void:
 	var w: float = hm[2]
 	var title_h := 24.0
 	var h: float = hm[3]
+	if not Rules.DROPS:
+		# 取った駒を使わない種類：駒台は出さず、名前の札だけ出す
+		w = 150.0
+		h = 28.0
 	var spots := {
 		view_seat: Vector2(size.x - w - 6, size.y - h - 6),
 		(view_seat + 1) % 3: Vector2(size.x - w - 6, 6),
@@ -344,7 +362,7 @@ func _draw_hands() -> void:
 				draw_string(_font, np, str(cnt), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(1, 1, 0.85))
 			_hand_hits.append([cell_rect, p, k])
 			n += 1
-		if n == 0:
+		if n == 0 and Rules.DROPS:
 			draw_string(_font, origin + Vector2(8, title_h + slot), "持ち駒なし", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(1, 1, 1, 0.6))
 
 
@@ -428,6 +446,11 @@ func _start_pinch() -> void:
 
 ## 軽く押したとき：駒台の駒、盤の駒、行き先を選ぶ
 func _click(pos: Vector2) -> void:
+	# どの駒でも、押せば名前と動きを案内する（自分の番でなくても）
+	if not state.is_empty():
+		var ci := _cell_at(pos)
+		if ci >= 0 and state["board"][ci] != 0:
+			piece_tapped.emit(state["board"][ci])
 	if not _can_act():
 		return
 	for hit in _hand_hits:
