@@ -6,6 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
+const VERSION := "1.4"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -290,7 +291,16 @@ func _build_lobby() -> void:
 	_status = Label.new()
 	_status.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_status.add_theme_color_override("font_color", Color(1.0, 0.85, 0.5))
+	if OS.has_feature("web"):
+		_status.text = "名前や部屋コードは、欄を押すと入力画面が出ます"
 	v.add_child(_status)
+
+	var ver := Label.new()
+	ver.text = "版 %s" % VERSION
+	ver.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	ver.add_theme_font_size_override("font_size", 12)
+	ver.modulate = Color(1, 1, 1, 0.45)
+	v.add_child(ver)
 
 
 func _row(label: String, ctl: Control) -> Control:
