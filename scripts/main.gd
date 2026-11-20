@@ -55,6 +55,8 @@ func _ready() -> void:
 
 	_build_lobby()
 	_build_game()
+	_web_input(_name_edit, "名前を入れてください（16文字まで）")
+	_web_input(_code_edit, "部屋コードを入れてください")
 	_load_settings()
 	_read_url_room()
 	_show_lobby()
@@ -92,6 +94,28 @@ func _save_settings() -> void:
 	cf.set_value("main", "name", _player_name())
 	cf.set_value("main", "server", _server_url())
 	cf.save(SETTINGS_PATH)
+
+
+## Web版では入力欄を押すと、ブラウザの入力画面を出す。
+## （Godot の入力欄は、ブラウザだと日本語入力やスマホのキーボードが効かないことがあるため）
+func _web_input(edit: LineEdit, question: String) -> void:
+	if not OS.has_feature("web"):
+		return
+	edit.editable = false
+	edit.add_theme_color_override("font_uneditable_color", Color(0.95, 0.95, 0.95))
+	edit.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	edit.gui_input.connect(func(ev: InputEvent):
+		# スマホのタッチもマウスのクリックとして届く
+		if not (ev is InputEventMouseButton and ev.pressed and ev.button_index == MOUSE_BUTTON_LEFT):
+			return
+		edit.accept_event()
+		var js := "window.prompt(%s, %s)" % [JSON.stringify(question), JSON.stringify(edit.text)]
+		var r = JavaScriptBridge.eval(js, true)
+		if typeof(r) == TYPE_STRING:
+			var t := String(r).strip_edges().substr(0, edit.max_length if edit.max_length > 0 else 32)
+			if t != "":
+				edit.text = t
+				_save_settings())
 
 
 ## Web版で「...?room=ABCD」のリンクから開かれたら、部屋コードを入れておく
