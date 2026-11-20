@@ -1,5 +1,4 @@
 .godot/
 .git/
-docs/
+.claude/
 tests/
-*.png

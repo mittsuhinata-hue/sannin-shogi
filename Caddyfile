@@ -1,0 +1,17 @@
+# Render 上で、ゲームのページ（docs）と対戦サーバー（Godot）を同じURLで出す
+{
+	admin off
+	auto_https off
+	persist_config off
+}
+
+:{$PORT} {
+	# ゲームの通信（WebSocket）は Godot の対戦サーバーへ
+	@ws header Upgrade websocket
+	reverse_proxy @ws 127.0.0.1:24565
+
+	# それ以外はゲームのページ
+	root * /app/docs
+	header Cache-Control "no-cache"
+	file_server
+}
