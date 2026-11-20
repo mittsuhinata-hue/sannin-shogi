@@ -48,6 +48,7 @@ var test_rooms := false   ## サーバーのテスト用
 
 var main_sec := 0          ## 持ち時間（秒、0 = なし）。部屋を作った人の設定
 var byo_sec := 0           ## 秒読み（秒、0 = なし）
+var room_clock: Array = [0, 0]  ## いる部屋の [持ち時間, 秒読み]（部屋を作った人が決める）
 var _recv_time := 0.0      ## 盤面を受け取った時刻（考え中の時間の計算用）
 
 
@@ -151,13 +152,14 @@ func _clean_name(n: String) -> String:
 
 
 @rpc("any_peer", "reliable")
-func _create_room(player_name: String) -> void:
+func _create_room(player_name: String, main: int = 0, byo: int = 0) -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
 	_server_leave_room(id)
 	var code := _new_code()
-	_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0}
+	_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0,
+		"clock": [clampi(main, 0, 7200), clampi(byo, 0, 600)]}
 	_server_join(id, code, player_name)
 
 
@@ -169,7 +171,7 @@ func _join_room(code: String, player_name: String) -> void:
 	code = code.strip_edges().to_upper()
 	if not _rooms.has(code) and test_rooms and code != "":
 		# テスト用：無い部屋コードに入ろうとしたら、その部屋を作る
-		_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0}
+		_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0, "clock": [0, 0]}
 	if not _rooms.has(code):
 		_error.rpc_id(id, "部屋 %s が見つかりません" % code)
 		return
@@ -195,11 +197,24 @@ func _server_join(id: int, code: String, player_name: String) -> void:
 
 func _send_members(room: Dictionary) -> void:
 	for m in room["members"]:
-		_members_update.rpc_id(m["id"], room["members"], room["owner"], room["in_game"])
+		_members_update.rpc_id(m["id"], room["members"], room["owner"], room["in_game"], room.get("clock", [0, 0]))
+
+
+## 部屋を作った人が、対局前に持ち時間と秒読みを変える
+@rpc("any_peer", "reliable")
+func _set_clock(main: int, byo: int) -> void:
+	if mode != Mode.SERVER:
+		return
+	var id := multiplayer.get_remote_sender_id()
+	var room := _room_of(id)
+	if room.is_empty() or room["owner"] != id or room["in_game"]:
+		return
+	room["clock"] = [clampi(main, 0, 7200), clampi(byo, 0, 600)]
+	_send_members(room)
 
 
 @rpc("any_peer", "reliable")
-func _start_room(main: int = 0, byo: int = 0) -> void:
+func _start_room() -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
@@ -207,7 +222,9 @@ func _start_room(main: int = 0, byo: int = 0) -> void:
 	if room.is_empty() or room["owner"] != id:
 		return
 	room["turn_key"] = ""
-	room["clock"] = [main, byo]
+	var clock: Array = room.get("clock", [0, 0])
+	var main: int = clock[0]
+	var byo: int = clock[1]
 	var seats_new: Array = []
 	for i in 3:
 		if i < room["members"].size():
@@ -426,7 +443,7 @@ func _connect(url: String, then: Callable) -> void:
 
 func create_room(url: String, player_name: String) -> void:
 	my_name = player_name
-	_connect(url, func(): _create_room.rpc_id(1, my_name))
+	_connect(url, func(): _create_room.rpc_id(1, my_name, main_sec, byo_sec))
 
 
 func join_room(url: String, code: String, player_name: String) -> void:
@@ -440,7 +457,7 @@ func join_room(url: String, code: String, player_name: String) -> void:
 
 func start_game() -> void:
 	if mode == Mode.ONLINE:
-		_start_room.rpc_id(1, main_sec, byo_sec)
+		_start_room.rpc_id(1)
 	elif mode == Mode.LOCAL:
 		var humans := 0
 		for s in seats:
@@ -481,11 +498,20 @@ func _room_info(code: String) -> void:
 
 
 @rpc("authority", "reliable")
-func _members_update(list: Array, owner: int, playing: bool) -> void:
+func _members_update(list: Array, owner: int, playing: bool, clock: Array = [0, 0]) -> void:
 	members = list
 	owner_id = owner
 	in_game = playing
+	room_clock = clock
 	room_changed.emit()
+
+
+## 部屋を作った人が設定を変えたら、サーバーに伝える
+func set_clock(main: int, byo: int) -> void:
+	main_sec = main
+	byo_sec = byo
+	if is_owner() and not in_game:
+		_set_clock.rpc_id(1, main, byo)
 
 
 @rpc("authority", "reliable")
@@ -551,6 +577,7 @@ func leave() -> void:
 	room_code = ""
 	members = []
 	owner_id = 0
+	room_clock = [0, 0]
 	seats = []
 	my_seat = -1
 	state = {}

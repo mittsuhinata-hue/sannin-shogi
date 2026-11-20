@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "1.8.1"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "1.9"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -35,11 +35,22 @@ var _resign_btn: Button
 var _undo_btn: Button
 var _main_opt: OptionButton
 var _byo_opt: OptionButton
+var _clock_row: Control
 var _clock_label: Label
 var _warned_turn_key := ""
 
 const MAIN_TIMES := [["なし", 0], ["1分", 60], ["3分", 180], ["5分", 300], ["10分", 600], ["20分", 1200]]
 const BYO_TIMES := [["なし", 0], ["10秒", 10], ["20秒", 20], ["30秒", 30], ["60秒", 60]]
+
+
+## 部屋の設定 [持ち時間, 秒読み] を欄に表示する
+func _select_clock(clock: Array) -> void:
+	for i in MAIN_TIMES.size():
+		if MAIN_TIMES[i][1] == int(clock[0]):
+			_main_opt.selected = i
+	for i in BYO_TIMES.size():
+		if BYO_TIMES[i][1] == int(clock[1]):
+			_byo_opt.selected = i
 
 
 func _apply_clock_setting() -> void:
@@ -288,6 +299,7 @@ func _build_lobby() -> void:
 	for o in [_main_opt, _byo_opt]:
 		o.item_selected.connect(func(_i):
 			_apply_clock_setting()
+			Net.set_clock(Net.main_sec, Net.byo_sec)
 			_save_settings())
 	var th_row := HBoxContainer.new()
 	th_row.add_child(_main_opt)
@@ -297,7 +309,8 @@ func _build_lobby() -> void:
 	th_row.add_child(_byo_opt)
 	_main_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_byo_opt.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	v.add_child(_row("持ち時間", th_row))
+	# 部屋に入る前は「部屋を作る」ボタンの上、入ったあとは部屋の画面に置く（_show_lobby で移す）
+	_clock_row = _row("持ち時間", th_row)
 
 	# --- 部屋に入る前 ---
 	var entry := VBoxContainer.new()
@@ -441,6 +454,18 @@ func _show_lobby() -> void:
 	_start_btn.visible = Net.is_owner()
 	_wait_label.visible = in_room and not Net.is_owner()
 	# 部屋では、作った人の制限時間が使われる
+	# 持ち時間の欄を、いまの画面の正しい場所へ移す
+	var want_parent: Control = _room_box if in_room else _entry_box
+	if _clock_row.get_parent() != want_parent:
+		if _clock_row.get_parent():
+			_clock_row.get_parent().remove_child(_clock_row)
+		want_parent.add_child(_clock_row)
+	want_parent.move_child(_clock_row, 1 if in_room else 0)
+	# 部屋では、作った人の設定が使われる（入った人は見るだけ）
+	if in_room:
+		_select_clock(Net.room_clock)
+	else:
+		_select_clock([Net.main_sec, Net.byo_sec])
 	_main_opt.disabled = in_room and not Net.is_owner()
 	_byo_opt.disabled = _main_opt.disabled
 	_copy_btn.text = "招待リンクをコピー" if OS.has_feature("web") else "部屋コードをコピー"
