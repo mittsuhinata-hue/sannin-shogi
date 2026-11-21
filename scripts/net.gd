@@ -214,7 +214,7 @@ func _send_members(room: Dictionary) -> void:
 
 ## 部屋の決まり [持ち時間, 秒読み, 将棋の種類]
 static func _rules_of(main: int, byo: int, variant: String) -> Array:
-	return [clampi(main, 0, 7200), clampi(byo, 0, 600), variant if Rules.VARIANTS.has(variant) else "standard"]
+	return [clampi(main, 0, 7200), clampi(byo, 0, 600), variant if Rules.is_variant(variant) else "standard"]
 
 
 ## 部屋を作った人が、対局前に持ち時間・秒読み・将棋の種類を変える
@@ -242,10 +242,15 @@ func _start_room() -> void:
 	var clock: Array = room.get("clock", [0, 0])
 	var main: int = clock[0]
 	var byo: int = clock[1]
+	var vid: String = str(clock[2]) if clock.size() > 2 else "standard"
+	var players := 2 if Rules.variant_info(vid).get("rect", false) else 3
 	var seats_new: Array = []
 	var seat_tokens: Array = []
 	for i in 3:
-		if i < room["members"].size():
+		if i >= players:
+			seats_new.append({"id": ID_CPU, "name": "（なし）"})   # 1対1の3人目の席（使わない）
+			seat_tokens.append("")
+		elif i < room["members"].size():
 			var mid: int = room["members"][i]["id"]
 			seats_new.append({"id": mid, "name": room["members"][i]["name"], "base": room["members"][i]["name"]})
 			seat_tokens.append(room.get("tokens", {}).get(mid, ""))
@@ -254,7 +259,7 @@ func _start_room() -> void:
 			seat_tokens.append("")
 	room["seats"] = seats_new
 	room["seat_tokens"] = seat_tokens   # 席ごとの合言葉（サーバーだけが持つ）
-	room["state"] = Rules.new_game(str(clock[2]) if clock.size() > 2 else "standard")
+	room["state"] = Rules.new_game(vid)
 	_init_clock(room["state"], main, byo)
 	Rules.pick_first(room["state"], _seat_names(seats_new))
 	room["in_game"] = true
@@ -741,8 +746,12 @@ func start_local(humans: int, player_name: String) -> void:
 	mode = Mode.LOCAL
 	my_name = player_name
 	seats = []
+	var players := 2 if Rules.variant_info(variant_id).get("rect", false) else 3
+	humans = mini(humans, players)
 	for i in 3:
-		if i < humans:
+		if i >= players:
+			seats.append({"id": ID_CPU, "name": "（なし）"})   # 1対1の3人目の席（使わない）
+		elif i < humans:
 			var nm := player_name if humans == 1 else Rules.player_name_default(i)
 			seats.append({"id": ID_LOCAL, "name": nm})
 		else:

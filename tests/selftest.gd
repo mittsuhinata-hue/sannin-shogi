@@ -138,9 +138,12 @@ func _init() -> void:
 	print("初期の合法手: ", counts)
 	check(counts[0] == counts[1] and counts[1] == counts[2] and counts[0] > 0, "初期手数が違う")
 	# 2b. 将棋の種類ごとに：盤の形・3人の手の数がそろうか・CPUが指し続けられるか
-	for vid in Rules.VARIANT_ORDER:
+	var all_ids: Array = Rules.VARIANT_ORDER.duplicate()
+	for vid0 in Rules.VARIANT_ORDER:
+		all_ids.append(vid0 + "_2p")
+	for vid in all_ids:
 		var vs := Rules.new_game(vid)
-		for i in Rules.CENTER:
+		for i in (0 if Rules.RECT else Rules.CENTER):
 			for d in Rules.KING_STEPS:
 				var a := Rules.step(Rules.cell_h(i), Rules.cell_r(i), Rules.cell_f(i), d[0], d[1])
 				if a.is_empty() or a[0] == 3:
@@ -148,9 +151,11 @@ func _init() -> void:
 				var b := Rules.step(a[0], a[1], a[2], -a[3], -a[4])
 				check(not b.is_empty() and Rules.idx(b[0], b[1], b[2]) == i, "%s: 戻れない %d" % [vid, i])
 		var cnt := []
-		for p in 3:
+		for p in Rules.PLAYERS:
 			cnt.append(Rules.legal_moves(vs, p).size())
-		check(cnt[0] == cnt[1] and cnt[1] == cnt[2] and cnt[0] > 0, "%s: 3人の手の数が違う %s" % [vid, str(cnt)])
+		check(cnt.count(cnt[0]) == cnt.size() and cnt[0] > 0, "%s: 手の数が人によって違う %s" % [vid, str(cnt)])
+		if Rules.RECT:
+			check(not vs["alive"][2], "%s: 1対1なのに3人目がいる" % vid)
 		var pieces := 0
 		for c in vs["board"]:
 			if c != 0:

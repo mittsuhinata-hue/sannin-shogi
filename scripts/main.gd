@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.1"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.2"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -36,6 +36,8 @@ var _undo_btn: Button
 var _main_opt: OptionButton
 var _byo_opt: OptionButton
 var _variant_opt: OptionButton
+var _players_opt: OptionButton
+var _hotseat_btn: Button
 var _variant_note: Label
 var _piece_info: Label
 var _clock_row: Control
@@ -62,17 +64,31 @@ func _select_clock(clock: Array) -> void:
 		if BYO_TIMES[i][1] == int(clock[1]):
 			_byo_opt.selected = i
 	if clock.size() > 2:
-		var vi := Rules.VARIANT_ORDER.find(str(clock[2]))
+		var vid := str(clock[2])
+		var vi := Rules.VARIANT_ORDER.find(Rules.base_of(vid))
 		if vi >= 0:
 			_variant_opt.selected = vi
-	_variant_note.text = Rules.VARIANTS[Rules.VARIANT_ORDER[_variant_opt.selected]]["note"]
+		_players_opt.selected = 1 if vid.ends_with("_2p") else 0
+	_update_variant_labels()
 
 
 func _apply_clock_setting() -> void:
 	Net.main_sec = MAIN_TIMES[_main_opt.selected][1]
 	Net.byo_sec = BYO_TIMES[_byo_opt.selected][1]
-	Net.variant_id = Rules.VARIANT_ORDER[_variant_opt.selected]
-	_variant_note.text = Rules.VARIANTS[Net.variant_id]["note"]
+	Net.variant_id = Rules.variant_id_for(Rules.VARIANT_ORDER[_variant_opt.selected], 2 if _players_opt.selected == 1 else 3)
+	_update_variant_labels()
+
+
+## 人数に合わせて、種類の名前・説明・ボタンの文字を変える
+func _update_variant_labels() -> void:
+	var two := _players_opt.selected == 1
+	for i in Rules.VARIANT_ORDER.size():
+		var vid := Rules.variant_id_for(Rules.VARIANT_ORDER[i], 2 if two else 3)
+		_variant_opt.set_item_text(i, Rules.variant_info(vid)["name"])
+	var cur := Rules.variant_id_for(Rules.VARIANT_ORDER[_variant_opt.selected], 2 if two else 3)
+	_variant_note.text = Rules.variant_info(cur)["note"]
+	if _hotseat_btn:
+		_hotseat_btn.text = "1台で2人" if two else "1台で3人"
 var _promo: ConfirmationDialog
 var _promo_moves: Array = []
 
@@ -182,6 +198,7 @@ func _load_settings() -> void:
 		_main_opt.selected = clampi(cf.get_value("main", "main_index", 0), 0, MAIN_TIMES.size() - 1)
 		_byo_opt.selected = clampi(cf.get_value("main", "byo_index", 0), 0, BYO_TIMES.size() - 1)
 		_variant_opt.selected = clampi(cf.get_value("main", "variant_index", 0), 0, Rules.VARIANT_ORDER.size() - 1)
+		_players_opt.selected = clampi(cf.get_value("main", "players_index", 0), 0, 1)
 	_apply_clock_setting()
 
 
@@ -192,6 +209,7 @@ func _save_settings() -> void:
 	cf.set_value("main", "main_index", _main_opt.selected)
 	cf.set_value("main", "byo_index", _byo_opt.selected)
 	cf.set_value("main", "variant_index", _variant_opt.selected)
+	cf.set_value("main", "players_index", _players_opt.selected)
 	cf.save(SETTINGS_PATH)
 
 
@@ -398,7 +416,16 @@ func _build_lobby() -> void:
 	_variant_note.add_theme_font_size_override("font_size", 14)
 	_variant_note.modulate = Color(1, 1, 1, 0.75)
 	# 部屋に入る前は「部屋を作る」ボタンの上、入ったあとは部屋の画面に置く（_show_lobby で移す）
+	# 人数（三人・1対1）
+	_players_opt = OptionButton.new()
+	_players_opt.add_item("三人（六角形の盤）")
+	_players_opt.add_item("1対1（四角い盤）")
+	_players_opt.item_selected.connect(func(_i):
+		_apply_clock_setting()
+		Net.set_clock(Net.main_sec, Net.byo_sec)
+		_save_settings())
 	var rules_box := VBoxContainer.new()
+	rules_box.add_child(_row("人数", _players_opt))
 	rules_box.add_child(_row("種類", _variant_opt))
 	rules_box.add_child(_variant_note)
 	rules_box.add_child(_row("持ち時間", th_row))
@@ -427,7 +454,8 @@ func _build_lobby() -> void:
 	var hb3 := HBoxContainer.new()
 	hb3.add_theme_constant_override("separation", 10)
 	hb3.add_child(_btn("ひとりで（CPU 2人と）", func(): Net.start_local(1, _player_name())))
-	hb3.add_child(_btn("1台で3人", func(): Net.start_local(3, _player_name())))
+	_hotseat_btn = _btn("1台で3人", func(): Net.start_local(3, _player_name()))
+	hb3.add_child(_hotseat_btn)
 	entry.add_child(hb3)
 	_server_edit = LineEdit.new()
 	_server_edit.text = Net.DEFAULT_SERVER
@@ -561,6 +589,7 @@ func _show_lobby() -> void:
 	_main_opt.disabled = in_room and not Net.is_owner()
 	_byo_opt.disabled = _main_opt.disabled
 	_variant_opt.disabled = _main_opt.disabled
+	_players_opt.disabled = _main_opt.disabled
 	_copy_btn.text = "招待リンクをコピー" if OS.has_feature("web") else "部屋コードをコピー"
 
 
@@ -647,7 +676,7 @@ func _build_game() -> void:
 		var hand := HFlowContainer.new()
 		bv.add_child(hand)
 		_players_box.add_child(box)
-		_player_boxes.append({"title": t, "hand": hand, "clock": clk})
+		_player_boxes.append({"title": t, "hand": hand, "clock": clk, "box": box})
 
 	var lg := Label.new()
 	lg.text = "棋譜"
@@ -769,6 +798,7 @@ func _refresh_game() -> void:
 	_turn_label.add_theme_color_override("font_color", BoardView.PLAYER_COLORS[col_seat].lightened(0.4))
 
 	for p in 3:
+		_player_boxes[p]["box"].visible = p < Rules.PLAYERS   # 1対1では3人目の枠を出さない
 		var title: Label = _player_boxes[p]["title"]
 		var mark := ""
 		if not st["alive"][p]:

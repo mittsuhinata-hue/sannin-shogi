@@ -163,6 +163,62 @@ const VARIANTS := {
 }
 const VARIANT_ORDER := ["standard", "mini", "chu", "taikyoku"]
 
+## 1対1（四角い盤）。rows は自分の一番奥の段から、自分から見て左から右へ。
+## 中身は三人用と同じ仕組みで、3人目の席を最初から空きにして使う。
+const VARIANTS_2P := {
+	"standard_2p": {
+		"name": "標準（9×9）", "rect": true, "files": 9, "ranks": 9, "zone": 3, "drops": true, "check": true, "zoom": 3.0,
+		"note": "本将棋（9×9）。取った駒を打てる。詰みで勝ち負け",
+		"rows": [
+			[KY, KE, GI, KI, OU, KI, GI, KE, KY],
+			[_E, KA, _E, _E, _E, _E, _E, HI, _E],
+			[FU, FU, FU, FU, FU, FU, FU, FU, FU],
+		],
+	},
+	"mini_2p": {
+		"name": "ミニ（5×5）", "rect": true, "files": 5, "ranks": 5, "zone": 1, "drops": true, "check": true, "zoom": 2.0,
+		"note": "5五将棋（5×5）。取った駒を打てる。詰みで勝ち負け",
+		"rows": [
+			[OU, KI, GI, KA, HI],
+			[FU, _E, _E, _E, _E],
+		],
+	},
+	"chu_2p": {
+		"name": "大きめ（12×12）", "rect": true, "files": 12, "ranks": 12, "zone": 4, "drops": false, "check": false, "zoom": 4.0,
+		"note": "中将棋（12×12）の並び。取った駒は使えない。玉（と太子）を全部取ったら勝ち",
+		"rows": [
+			[KY, MOHYO, DOSHO, GI, KI, SUIZO, OU, KI, GI, DOSHO, MOHYO, KY],
+			[HANSHA, _E, KA, _E, MOKO, HOO, KIRIN, MOKO, _E, KA, _E, HANSHA],
+			[OGYO, JUGYO, HI, RYUMA, RYUO, HONNO, SHISHI, RYUO, RYUMA, HI, JUGYO, OGYO],
+			[FU, FU, FU, FU, FU, FU, FU, FU, FU, FU, FU, FU],
+			[_E, _E, _E, CHUNIN, _E, _E, _E, _E, CHUNIN, _E, _E, _E],
+		],
+	},
+	"taikyoku_2p": {
+		"name": "大局将棋風（25×25）", "rect": true, "files": 25, "ranks": 25, "zone": 6, "drops": false, "check": false, "zoom": 6.0,
+		"note": "25×25の特大の盤。大局将棋の駒を約36種類。取った駒は使えない。玉（と太子）を全部取ったら勝ち",
+		"half_rows": VARIANTS["taikyoku"]["half_rows"],
+	},
+}
+
+static var RECT := false       ## 四角い盤（1対1）か
+static var PLAYERS := 3        ## 遊ぶ人数（1対1なら 2。席は3つのままで3人目は空き）
+
+static func all_variants() -> Dictionary:
+	var d := VARIANTS.duplicate()
+	d.merge(VARIANTS_2P)
+	return d
+
+static func is_variant(id: String) -> bool:
+	return VARIANTS.has(id) or VARIANTS_2P.has(id)
+
+## 三人用の種類と人数から、種類のIDを作る（例：standard + 2人 → standard_2p）
+static func variant_id_for(base: String, players: int) -> String:
+	return base + "_2p" if players == 2 else base
+
+static func base_of(id: String) -> String:
+	return id.trim_suffix("_2p")
+
 # いまの種類の決まり（use / set_variant で切り替わる）
 static var VARIANT_ID := ""
 static var FILES := 9
@@ -186,19 +242,27 @@ static var _att_maps: Array = []
 
 
 static func set_variant(id: String) -> void:
-	if not VARIANTS.has(id):
+	if not is_variant(id):
 		id = "standard"
 	if id == VARIANT_ID:
 		return
-	var v: Dictionary = VARIANTS[id]
+	var v: Dictionary = variant_info(id)
 	VARIANT_ID = id
+	RECT = v.get("rect", false)
+	PLAYERS = 2 if RECT else 3
 	FILES = v["files"]
 	RANKS = v["ranks"]
 	TOP = RANKS - 1
 	MID = (FILES - 1) / 2
-	HALF = FILES * RANKS
-	CENTER = 3 * HALF
-	CELLS = CENTER + 1
+	if RECT:
+		# 四角い盤：マス番号 = 段y*FILES + 筋x（y=0 が席0の一番奥、x は席0から見て左から）
+		HALF = FILES * RANKS
+		CELLS = HALF
+		CENTER = -1   # 中央のマスはない
+	else:
+		HALF = FILES * RANKS
+		CENTER = 3 * HALF
+		CELLS = CENTER + 1
 	ZONE = v["zone"]
 	DROPS = v["drops"]
 	CHECK_RULE = v["check"]
@@ -208,7 +272,10 @@ static func use(state: Dictionary) -> void:
 	set_variant(str(state.get("variant", "standard")))
 
 static func variant_info(id: String = "") -> Dictionary:
-	return VARIANTS.get(id if id != "" else VARIANT_ID, VARIANTS["standard"])
+	var key := id if id != "" else VARIANT_ID
+	if VARIANTS_2P.has(key):
+		return VARIANTS_2P[key]
+	return VARIANTS.get(key, VARIANTS["standard"])
 
 static func _rows_of(v: Dictionary) -> Array:
 	if v.has("rows"):
@@ -295,13 +362,22 @@ static func new_game(variant: String = "standard") -> Dictionary:
 	var board: Array = []
 	board.resize(CELLS)
 	board.fill(0)
-	var rows := _rows_of(VARIANTS[VARIANT_ID])
-	for p in 3:
+	var rows := _rows_of(variant_info(VARIANT_ID))
+	if RECT:
+		# 席0は手前（y=0側）、席1は向こう側に、ぐるっと回した並びで置く
 		for r in rows.size():
 			var row: Array = rows[r]
 			for f in FILES:
 				if row[f] >= 0:
-					board[idx(p, r, f)] = make_piece(p, row[f], false)
+					board[r * FILES + f] = make_piece(0, row[f], false)
+					board[(RANKS - 1 - r) * FILES + (FILES - 1 - f)] = make_piece(1, row[f], false)
+	else:
+		for p in 3:
+			for r in rows.size():
+				var row: Array = rows[r]
+				for f in FILES:
+					if row[f] >= 0:
+						board[idx(p, r, f)] = make_piece(p, row[f], false)
 	var hands: Array = []
 	for p in 3:
 		var hnd: Array = []
@@ -313,7 +389,7 @@ static func new_game(variant: String = "standard") -> Dictionary:
 		"board": board,
 		"hands": hands,
 		"turn": 0,
-		"alive": [true, true, true],
+		"alive": [true, true, not RECT],   # 1対1では3人目の席は最初から空き
 		"winner": -1,
 		"last_from": -1,
 		"last_to": -1,
@@ -324,7 +400,11 @@ static func new_game(variant: String = "standard") -> Dictionary:
 
 ## 先手をくじ引きで決める
 static func pick_first(state: Dictionary, names: Array) -> void:
-	var t := randi() % 3
+	var seats_alive: Array = []
+	for p in 3:
+		if state["alive"][p]:
+			seats_alive.append(p)
+	var t: int = seats_alive[randi() % seats_alive.size()]
 	state["turn"] = t
 	state["log"].append("先手は %s（%s）" % [names[t], player_name_default(t)])
 
@@ -383,6 +463,9 @@ static func _ai(a: Array) -> int:
 
 ## 駒の居場所 [h, r, f, s]（s はその陣地での「前」の向き）。中央は [3, 0, 0, 0]
 static func _start(owner: int, i: int) -> Array:
+	if RECT:
+		# 四角い盤：[4, 段y, 筋x, 向き]。席0は y が増える向きが前、席1は減る向きが前
+		return [4, i / FILES, i % FILES, 1 if owner == 0 else -1]
 	if i == CENTER:
 		return [3, 0, 0, 0]
 	var h := cell_h(i)
@@ -390,6 +473,13 @@ static func _start(owner: int, i: int) -> Array:
 
 ## 居場所 pos から、持ち主の向き v に1歩進んだ先の一覧（中央では分かれることがある）
 static func _adv(owner: int, pos: Array, v: Array) -> Array:
+	if pos[0] == 4:
+		var s4: int = pos[3]
+		var ny: int = pos[1] + s4 * int(v[0])
+		var nx: int = pos[2] + s4 * int(v[1])
+		if ny < 0 or ny >= RANKS or nx < 0 or nx >= FILES:
+			return []
+		return [[4, ny, nx, s4]]
 	if pos[0] == 3:
 		var out: Array = []
 		for a in center_steps(owner, v):
@@ -404,6 +494,8 @@ static func _adv(owner: int, pos: Array, v: Array) -> Array:
 	return [[a[0], a[1], a[2], s if a[0] == pos[0] else -s]]
 
 static func _pi(pos: Array) -> int:
+	if pos[0] == 4:
+		return pos[1] * FILES + pos[2]
 	return CENTER if pos[0] == 3 else idx(pos[0], pos[1], pos[2])
 
 ## マス i にいる owner の駒が、向き v に1歩進んだ先の一覧（二歩の確認などで使う）
@@ -540,13 +632,22 @@ static func in_check(board: Array, pl: int, alive: Array) -> bool:
 
 # ---------- 成り ----------
 
+## 四角い盤で、相手の一番奥の段から数えて何段目か（0が一番奥）
+static func _rect_depth(pl: int, i: int) -> int:
+	var y := i / FILES
+	return (RANKS - 1 - y) if pl == 0 else y
+
 static func in_zone(pl: int, i: int) -> bool:
+	if RECT:
+		return _rect_depth(pl, i) < ZONE
 	return i != CENTER and cell_h(i) != pl and cell_r(i) < ZONE
 
 static func must_promote(kind: int, pl: int, t: int) -> bool:
+	var dead: int = PIECES[kind].get("dead", 0)
+	if RECT:
+		return dead > 0 and _rect_depth(pl, t) < dead
 	if t == CENTER or cell_h(t) == pl:
 		return false
-	var dead: int = PIECES[kind].get("dead", 0)
 	return dead > 0 and cell_r(t) < dead
 
 
@@ -555,6 +656,12 @@ static func must_promote(kind: int, pl: int, t: int) -> bool:
 ## 持ち主から見た縦の筋（中央をまたいでも続く）に、自分の成っていない歩があるか。
 static func pawn_on_line(board: Array, pl: int, t: int) -> bool:
 	var pawn := make_piece(pl, FU, false)
+	if RECT:
+		var x := t % FILES
+		for y in RANKS:
+			if board[y * FILES + x] == pawn:
+				return true
+		return false
 	if t == CENTER:
 		for h in 3:
 			for r in RANKS:

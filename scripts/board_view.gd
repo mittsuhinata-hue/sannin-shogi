@@ -43,6 +43,8 @@ var _tri_cell := PackedInt32Array()       ## 三角形の頂点がどのマス�
 var _grid := PackedVector2Array()         ## マスの線（まとめて1回で描く）
 var _outline := PackedVector2Array()
 var _hand_hits: Array = []  ## [Rect2, 席, 駒の種類]
+var _rect_origin := Vector2.ZERO   ## 四角い盤の左上
+var _rect_cell := 1.0              ## 四角い盤の1マスの大きさ
 
 # ---- 拡大・移動 ----
 const ZOOM_MIN := 1.0
@@ -246,8 +248,75 @@ func _is_tall() -> bool:
 	return size.y > size.x * 1.15
 
 
+## 四角い盤（1対1）で、下に来る席（0か1）
+func _rect_view() -> int:
+	return 1 if view_seat == 1 else 0
+
+
+## 四角い盤の形を計算する
+func _rebuild_rect() -> void:
+	# 名前の札（上）と拡大ボタン（下）に重ならないよう、上下に少しすき間を空ける
+	var area := Rect2(0, 36, size.x, size.y - 36 - 50)
+	if Rules.DROPS:
+		var band: float = _hand_metrics()[3] + 6.0
+		if _is_tall():
+			area = Rect2(0, band, size.x, size.y - band * 2.0)
+		else:
+			area = Rect2(_hand_metrics()[2] + 10.0, 0, size.x - (_hand_metrics()[2] + 10.0) * 2.0, size.y)
+	var w := float(Rules.FILES)
+	var h := float(Rules.RANKS)
+	var cell: float = min(area.size.x / w, area.size.y / h) * 0.96
+	_center = area.get_center()
+	_radius = max(w, h) * cell * 0.5
+	var origin := _center - Vector2(w, h) * cell * 0.5
+	_rect_origin = origin
+	_rect_cell = cell
+	var flip := _rect_view() == 1
+	for i in Rules.CELLS:
+		var x := i % Rules.FILES
+		var y := i / Rules.FILES
+		var col := (Rules.FILES - 1 - x) if flip else x
+		var row := y if flip else (Rules.RANKS - 1 - y)
+		var p0 := origin + Vector2(col, row) * cell
+		var poly := PackedVector2Array([p0, p0 + Vector2(cell, 0), p0 + Vector2(cell, cell), p0 + Vector2(0, cell)])
+		_add_cell_shape(i, poly, p0 + Vector2(cell, cell) * 0.5, cell)
+	var br := origin + Vector2(w, h) * cell
+	_outline = PackedVector2Array([origin, Vector2(br.x, origin.y), br, Vector2(origin.x, br.y), origin])
+
+
+## マス1つ分の形を登録する（塗り用の三角形と線もまとめて作る）
+func _add_cell_shape(i: int, poly: PackedVector2Array, c: Vector2, m: float) -> void:
+	_polys.append(poly)
+	_centers.append(c)
+	_sizes.append(m)
+	var base := _tri_points.size()
+	for e in poly.size():
+		var a: Vector2 = poly[e]
+		var b: Vector2 = poly[(e + 1) % poly.size()]
+		_grid.append(a)
+		_grid.append(b)
+		_tri_points.append(a)
+		_tri_cell.append(i)
+	for e in range(1, poly.size() - 1):
+		_tri_index.append(base)
+		_tri_index.append(base + e)
+		_tri_index.append(base + e + 1)
+
+
 ## 盤の形を計算し直す（大きさ・種類・向きが変わったときだけ）
 func _rebuild() -> void:
+	if Rules.RECT:
+		_polys.clear()
+		_centers.clear()
+		_sizes.clear()
+		_tri_points = PackedVector2Array()
+		_tri_index = PackedInt32Array()
+		_tri_cell = PackedInt32Array()
+		_grid = PackedVector2Array()
+		_rebuild_rect()
+		_apply_view()
+		_redraw()
+		return
 	if _is_tall() and Rules.DROPS:
 		var band: float = _hand_metrics()[3] + 6.0
 		var area_h := size.y - band * 2.0
@@ -302,6 +371,8 @@ func _rebuild() -> void:
 
 
 func _forward_dir(owner: int, i: int) -> Vector2:
+	if Rules.RECT:
+		return Vector2(0, -1) if owner == _rect_view() else Vector2(0, 1)
 	if i == Rules.CENTER:
 		return (_center - _hex_m(2 * owner)).normalized()
 	var h := Rules.cell_h(i)
@@ -335,7 +406,7 @@ func draw_board(cv: CanvasItem) -> void:
 		if i != Rules.CENTER:
 			var h := Rules.cell_h(i)
 			col = HALF_TINT[h]
-			if not state.is_empty() and not state["alive"][h]:
+			if not state.is_empty() and not Rules.RECT and not state["alive"][h]:
 				col = col.darkened(0.25)
 		if not state.is_empty() and (i == state["last_to"] or i == state["last_from"]):
 			col = col.lerp(Color(1.0, 0.65, 0.2), 0.45)
@@ -352,9 +423,16 @@ func draw_board(cv: CanvasItem) -> void:
 		colors[k] = cell_col[_tri_cell[k]]
 	RenderingServer.canvas_item_add_triangle_array(cv.get_canvas_item(), _tri_index, _tri_points, colors)
 	cv.draw_multiline(_grid, LINE_COL, 1.0)
-	# 3人の陣地の境目だけ少し太く
-	for h in 3:
-		cv.draw_line(_hex_m(2 * h + 1), _q(h), LINE_COL, 2.5)
+	if Rules.RECT:
+		# 成れる場所の境目（本物の将棋盤の星の代わり）
+		var w := Rules.FILES * _rect_cell
+		for rr in [Rules.ZONE, Rules.RANKS - Rules.ZONE]:
+			var yy: float = _rect_origin.y + rr * _rect_cell
+			cv.draw_line(Vector2(_rect_origin.x, yy), Vector2(_rect_origin.x + w, yy), LINE_COL, 2.2)
+	else:
+		# 3人の陣地の境目だけ少し太く
+		for h in 3:
+			cv.draw_line(_hex_m(2 * h + 1), _q(h), LINE_COL, 2.5)
 	var closed := _outline.duplicate()
 	cv.draw_polyline(closed, Color(0.2, 0.1, 0.0), 4.0)
 	if state.is_empty():
@@ -420,7 +498,11 @@ func _draw_hands() -> void:
 		(view_seat + 2) % 3: Vector2(6, 6),
 	}
 	for p in 3:
+		if p >= Rules.PLAYERS:
+			continue   # 1対1では3人目の席は出さない
 		var origin: Vector2 = spots[p]
+		if Rules.PLAYERS == 2 and p != view_seat:
+			origin = Vector2(6, 6)   # 1対1の相手は左上
 		var rect := Rect2(origin, Vector2(w, h))
 		var turn_now: bool = state["winner"] < 0 and state["turn"] == p and state["alive"][p]
 		draw_rect(rect, Color(0.62, 0.45, 0.25) if state["alive"][p] else Color(0.35, 0.30, 0.25))
