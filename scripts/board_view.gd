@@ -1,7 +1,13 @@
 extends Control
 ## 六角形の盤と駒台を描き、クリックで駒を動かす。
+##
+## 軽く動かすための工夫：
+##  ・盤の形（マスの多角形）は、大きさ・種類・向きが変わったときだけ計算する
+##  ・盤の絵は子の層（board_layer）に描き、拡大・移動は層の位置と大きさを変えるだけ
+##  ・描き直すのは、駒が動いたとき・選んだとき・拡大の倍率が変わって少し止まったとき
 
 const Rules = preload("res://scripts/rules.gd")
+const BoardLayer = preload("res://scripts/board_layer.gd")
 
 signal move_chosen(m: Dictionary)
 signal promotion_choice(m_no: Dictionary, m_yes: Dictionary)
@@ -24,11 +30,18 @@ var selected_drop := -1
 var targets: Array = []   ## 選んだ駒の合法手
 
 var _font: Font
+var _layer: Node2D
+# 盤の形（拡大1倍のときの座標）
 var _polys: Array = []    ## マスごとの多角形
 var _centers: Array = []
 var _sizes: Array = []
-var _center := Vector2.ZERO
-var _radius := 100.0
+var _center := Vector2.ZERO   ## 盤の中心（拡大1倍のとき）
+var _radius := 100.0          ## 盤の半径（拡大1倍のとき）
+var _tri_points := PackedVector2Array()   ## 全マスをまとめて塗るための三角形
+var _tri_index := PackedInt32Array()
+var _tri_cell := PackedInt32Array()       ## 三角形の頂点がどのマスのものか
+var _grid := PackedVector2Array()         ## マスの線（まとめて1回で描く）
+var _outline := PackedVector2Array()
 var _hand_hits: Array = []  ## [Rect2, 席, 駒の種類]
 
 # ---- 拡大・移動 ----
@@ -38,8 +51,7 @@ const DRAG_START := 10.0   ## これ以上指やマウスが動いたら「な�
 var _zoom := 1.0
 var _pan := Vector2.ZERO
 var _drawn_variant := ""
-var _base_center := Vector2.ZERO
-var _base_radius := 100.0
+var _drawn_zoom := 1.0     ## 盤の字をこの倍率に合わせて描いた
 var _zoom_bar: HBoxContainer
 var _press_pos := Vector2.ZERO
 var _mouse_down := false
@@ -48,13 +60,25 @@ var _touches := {}          ## 指の番号 → 位置（2本指でつまむ操�
 var _pinch_dist := 0.0
 var _pinch_mid := Vector2.ZERO
 var _no_click_until := 0    ## つまむ操作の直後は、離した指で駒を選ばない
+var _sharpen_timer: Timer   ## 拡大が止まったら字をくっきり描き直す
 
 
 func _ready() -> void:
 	_font = preload("res://scripts/ui_font.gd").make(true)
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	clip_contents = true
+	_layer = BoardLayer.new()
+	_layer.view = self
+	_layer.show_behind_parent = true   # 盤は駒台（親に描く）より後ろに
+	add_child(_layer)
 	_build_zoom_bar()
+	_sharpen_timer = Timer.new()
+	_sharpen_timer.one_shot = true
+	_sharpen_timer.wait_time = 0.18
+	_sharpen_timer.timeout.connect(func():
+		if not is_equal_approx(_drawn_zoom, _zoom):
+			_layer.queue_redraw())
+	add_child(_sharpen_timer)
 	resized.connect(_rebuild)
 	_rebuild()
 
@@ -62,7 +86,7 @@ func _ready() -> void:
 func _build_zoom_bar() -> void:
 	_zoom_bar = HBoxContainer.new()
 	_zoom_bar.add_theme_constant_override("separation", 4)
-	for item in [["＋", func(): _zoom_at(_center, 1.35)], ["－", func(): _zoom_at(_center, 1.0 / 1.35)], ["全体", reset_zoom]]:
+	for item in [["＋", func(): _zoom_at(_view_center(), 1.35)], ["－", func(): _zoom_at(_view_center(), 1.0 / 1.35)], ["全体", reset_zoom]]:
 		var b := Button.new()
 		b.text = item[0]
 		b.custom_minimum_size = Vector2(44, 40)
@@ -74,10 +98,39 @@ func _build_zoom_bar() -> void:
 	_zoom_bar.size = _zoom_bar.get_combined_minimum_size()
 
 
+func _redraw() -> void:
+	queue_redraw()
+	if _layer:
+		_layer.queue_redraw()
+
+
+# ---------- 拡大・移動 ----------
+
+## 画面上での盤の中心
+func _view_center() -> Vector2:
+	return _center + _pan
+
+## 画面の点 → 盤の座標（拡大1倍のとき）
+func _to_board(p: Vector2) -> Vector2:
+	return (p - _layer.position) / _zoom
+
+## 拡大・移動を層に反映する（描き直しはしない）
+func _apply_view() -> void:
+	var lim: float = _radius * (_zoom - 1.0)
+	_pan.x = clamp(_pan.x, -lim, lim)
+	_pan.y = clamp(_pan.y, -lim * 0.9, lim * 0.9)
+	if _layer:
+		_layer.scale = Vector2(_zoom, _zoom)
+		_layer.position = _center + _pan - _center * _zoom
+	if _zoom_bar:
+		_zoom_bar.position = Vector2(6, size.y - _zoom_bar.size.y - 6)
+
+
 func reset_zoom() -> void:
 	_zoom = 1.0
 	_pan = Vector2.ZERO
-	_rebuild()
+	_apply_view()
+	_sharpen_timer.start()
 
 
 ## 画面の点 p を中心に、factor 倍に拡大する（p の下にあるマスは動かない）
@@ -86,19 +139,22 @@ func _zoom_at(p: Vector2, factor: float) -> void:
 	var nz: float = clamp(_zoom * factor, ZOOM_MIN, zmax)
 	if is_equal_approx(nz, _zoom):
 		return
-	var q := (p - _center) / _radius
+	var b := _to_board(p)
 	_zoom = nz
-	var new_center := p - q * (_base_radius * _zoom)
-	_pan = new_center - _base_center
-	_rebuild()
+	var new_pos := p - b * _zoom
+	_pan = new_pos + _center * _zoom - _center
+	_apply_view()
+	_sharpen_timer.start()
 
 
 func _pan_by(d: Vector2) -> void:
 	if _zoom <= 1.001:
 		return
 	_pan += d
-	_rebuild()
+	_apply_view()
 
+
+# ---------- 盤面・選択 ----------
 
 func set_state(s: Dictionary) -> void:
 	state = s
@@ -111,7 +167,6 @@ func set_state(s: Dictionary) -> void:
 		_pan = Vector2.ZERO
 		_rebuild()
 	clear_selection()
-	queue_redraw()
 
 
 func clear_selection() -> void:
@@ -119,7 +174,7 @@ func clear_selection() -> void:
 	selected_drop = -1
 	targets = []
 	selection_changed.emit()
-	queue_redraw()
+	_redraw()
 
 
 func set_view_seat(seat: int) -> void:
@@ -139,14 +194,14 @@ func select_drop(kind: int) -> void:
 	targets = Rules.drops_of(state, my_seat, kind)
 	Sfx.play("select")
 	selection_changed.emit()
-	queue_redraw()
+	_redraw()
 
 
 func _can_act() -> bool:
 	return not state.is_empty() and my_seat >= 0 and state["turn"] == my_seat and state["winner"] < 0
 
 
-# ---------- 形の計算 ----------
+# ---------- 形の計算（拡大1倍の座標） ----------
 
 func _hex_v(j: int) -> Vector2:
 	var a0 := deg_to_rad(90.0 + (2 * view_seat + 0.5) * 60.0)
@@ -162,7 +217,7 @@ func _q(h: int) -> Vector2:
 	var d := _radius * 0.866 / (1.732 * Rules.MID + 1.0)
 	return _center + (m - _center).normalized() * d
 
-## 陣地 h の (筋u, 段v) 座標 → 画面上の点。u:0..FILES, v:0..RANKS
+## 陣地 h の (筋u, 段v) 座標 → 盤上の点。u:0..FILES, v:0..RANKS
 func _pt(h: int, u: float, v: float) -> Vector2:
 	var k := 2 * h
 	var files := float(Rules.FILES)
@@ -191,26 +246,23 @@ func _is_tall() -> bool:
 	return size.y > size.x * 1.15
 
 
+## 盤の形を計算し直す（大きさ・種類・向きが変わったときだけ）
 func _rebuild() -> void:
 	if _is_tall() and Rules.DROPS:
 		var band: float = _hand_metrics()[3] + 6.0
 		var area_h := size.y - band * 2.0
-		_base_center = Vector2(size.x * 0.5, band + area_h * 0.5)
-		_base_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
+		_center = Vector2(size.x * 0.5, band + area_h * 0.5)
+		_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
 	else:
-		_base_center = size * 0.5
-		_base_radius = min(size.x / 2.0, size.y / 1.732) * (0.90 if Rules.DROPS else 0.97)
-	# 拡大・移動を反映（はみ出しすぎないように動かせる範囲を決める）
-	var lim: float = _base_radius * (_zoom - 1.0)
-	_pan.x = clamp(_pan.x, -lim, lim)
-	_pan.y = clamp(_pan.y, -lim * 0.9, lim * 0.9)
-	_center = _base_center + _pan
-	_radius = _base_radius * _zoom
-	if _zoom_bar:
-		_zoom_bar.position = Vector2(6, size.y - _zoom_bar.size.y - 6)
+		_center = size * 0.5
+		_radius = min(size.x / 2.0, size.y / 1.732) * (0.90 if Rules.DROPS else 0.97)
 	_polys.clear()
 	_centers.clear()
 	_sizes.clear()
+	_tri_points = PackedVector2Array()
+	_tri_index = PackedInt32Array()
+	_tri_cell = PackedInt32Array()
+	_grid = PackedVector2Array()
 	for i in Rules.CELLS:
 		var poly: PackedVector2Array
 		var c: Vector2
@@ -226,12 +278,27 @@ func _rebuild() -> void:
 		_polys.append(poly)
 		_centers.append(c)
 		var m := INF
+		var base := _tri_points.size()
 		for e in poly.size():
-			m = min(m, poly[e].distance_to(poly[(e + 1) % poly.size()]))
+			var a: Vector2 = poly[e]
+			var b: Vector2 = poly[(e + 1) % poly.size()]
+			m = min(m, a.distance_to(b))
+			_grid.append(a)
+			_grid.append(b)
+			_tri_points.append(a)
+			_tri_cell.append(i)
+		for e in range(1, poly.size() - 1):
+			_tri_index.append(base)
+			_tri_index.append(base + e)
+			_tri_index.append(base + e + 1)
 		if i == Rules.CENTER:
 			m *= 0.75
 		_sizes.append(m)
-	queue_redraw()
+	_outline = PackedVector2Array()
+	for j in 7:
+		_outline.append(_hex_v(j))
+	_apply_view()
+	_redraw()
 
 
 func _forward_dir(owner: int, i: int) -> Vector2:
@@ -246,14 +313,12 @@ func _forward_dir(owner: int, i: int) -> Vector2:
 
 # ---------- 描画 ----------
 
-func _draw() -> void:
+## 盤の層に描く（cv は board_layer）
+func draw_board(cv: CanvasItem) -> void:
 	if _polys.is_empty():
 		return
-	# 外枠
-	var outline := PackedVector2Array()
-	for j in 7:
-		outline.append(_hex_v(j))
-	draw_colored_polygon(outline, Color(0.45, 0.30, 0.15))
+	_drawn_zoom = _zoom
+	cv.draw_colored_polygon(_outline, Color(0.45, 0.30, 0.15))
 	var target_cells := {}
 	for m in targets:
 		target_cells[m["to"]] = true
@@ -262,6 +327,9 @@ func _draw() -> void:
 		var t: int = state["turn"]
 		if Rules.in_check(state["board"], t, state["alive"]):
 			check_king = Rules.find_king(state["board"], t)
+	# マスの色を決めて、全マスを1回でまとめて塗る
+	var cell_col: Array = []
+	cell_col.resize(Rules.CELLS)
 	for i in Rules.CELLS:
 		var col: Color = CENTER_TINT
 		if i != Rules.CENTER:
@@ -277,43 +345,59 @@ func _draw() -> void:
 			col = col.lerp(Color(1, 0.1, 0.1), 0.55)
 		if target_cells.has(i):
 			col = col.lerp(Color(0.3, 0.9, 0.4), 0.45)
-		draw_colored_polygon(_polys[i], col)
-		var pl: PackedVector2Array = _polys[i].duplicate()
-		pl.append(pl[0])
-		draw_polyline(pl, LINE_COL, 1.2, true)
+		cell_col[i] = col
+	var colors := PackedColorArray()
+	colors.resize(_tri_points.size())
+	for k in _tri_points.size():
+		colors[k] = cell_col[_tri_cell[k]]
+	RenderingServer.canvas_item_add_triangle_array(cv.get_canvas_item(), _tri_index, _tri_points, colors)
+	cv.draw_multiline(_grid, LINE_COL, 1.0)
 	# 3人の陣地の境目だけ少し太く
 	for h in 3:
-		draw_line(_hex_m(2 * h + 1), _q(h), LINE_COL, 2.5, true)
-	draw_polyline(outline, Color(0.2, 0.1, 0.0), 4.0, true)
+		cv.draw_line(_hex_m(2 * h + 1), _q(h), LINE_COL, 2.5)
+	var closed := _outline.duplicate()
+	cv.draw_polyline(closed, Color(0.2, 0.1, 0.0), 4.0)
 	if state.is_empty():
 		return
 	var board: Array = state["board"]
 	for i in Rules.CELLS:
 		if board[i] != 0:
-			_draw_piece(_centers[i], _forward_dir(Rules.p_owner(board[i]), i).angle() + PI / 2.0,
-				_sizes[i] * 0.46, board[i])
-	_draw_hands()
+			_draw_piece(cv, _centers[i], _forward_dir(Rules.p_owner(board[i]), i).angle() + PI / 2.0,
+				_sizes[i] * 0.46, board[i], _zoom)
 
 
-func _draw_piece(pos: Vector2, rot: float, sz: float, c: int, label := "") -> void:
+## 駒を1つ描く。text_zoom は字をくっきり描くための倍率（盤の層は拡大されるので、その分大きな字で描いて縮める）
+func _draw_piece(cv: CanvasItem, pos: Vector2, rot: float, sz: float, c: int, text_zoom := 1.0) -> void:
 	var owner := Rules.p_owner(c)
-	draw_set_transform(pos, rot, Vector2.ONE)
+	cv.draw_set_transform(pos, rot, Vector2.ONE)
 	var shape := PackedVector2Array([
 		Vector2(0, -1.0) * sz, Vector2(0.62, -0.62) * sz, Vector2(0.78, 0.92) * sz,
 		Vector2(-0.78, 0.92) * sz, Vector2(-0.62, -0.62) * sz])
-	draw_colored_polygon(shape, Color(0.98, 0.90, 0.70))
+	cv.draw_colored_polygon(shape, Color(0.98, 0.90, 0.70))
 	var closed := shape.duplicate()
 	closed.append(shape[0])
 	var pc: Color = PLAYER_COLORS[owner]
-	draw_polyline(closed, pc, max(2.0, sz * 0.14), true)
-	var text := label if label != "" else Rules.piece_label(c)
-	var fs := int(sz * 1.15)
+	cv.draw_polyline(closed, pc, max(1.5, sz * 0.14))
+	var text := Rules.piece_label(c)
+	var tz: float = max(text_zoom, 1.0)
+	var fs := int(sz * 1.15 * tz)
+	if fs < 2:
+		cv.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+		return
 	var w := _font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
 	var tc := pc.darkened(0.15)
 	if Rules.p_prom(c):
 		tc = Color(0.85, 0.05, 0.05) if owner != 0 else Color(0.55, 0.0, 0.4)
-	draw_string(_font, Vector2(-w / 2.0, fs * 0.42), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, tc)
-	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	cv.draw_set_transform(pos, rot, Vector2.ONE / tz)
+	cv.draw_string(_font, Vector2(-w / 2.0, fs * 0.42), text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs, tc)
+	cv.draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
+## 自分（親）に描くのは駒台だけ（盤の上に重なる、拡大しない部分）
+func _draw() -> void:
+	if state.is_empty() or _polys.is_empty():
+		return
+	_draw_hands()
 
 
 ## 盤の四隅の空きに駒台を描く。下の人＝右下、右上の辺の人＝右上、左上の辺の人＝左上。
@@ -355,7 +439,7 @@ func _draw_hands() -> void:
 			var cell_rect := Rect2(cell, Vector2(slot, slot))
 			if p == my_seat and selected_drop == k:
 				draw_rect(cell_rect, Color(0.3, 0.9, 0.4, 0.7))
-			_draw_piece(cell + Vector2(slot / 2, slot / 2), 0.0, slot * 0.40, Rules.make_piece(p, k, false))
+			_draw_piece(self, cell + Vector2(slot / 2, slot / 2), 0.0, slot * 0.40, Rules.make_piece(p, k, false))
 			if cnt > 1:
 				var np := cell + Vector2(slot * 0.86, slot * 0.92)
 				draw_string(_font, np + Vector2(1, 1), str(cnt), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0, 0, 0, 0.7))
@@ -368,9 +452,11 @@ func _draw_hands() -> void:
 
 # ---------- 操作 ----------
 
+## 画面の点にあるマス（なければ -1）
 func _cell_at(p: Vector2) -> int:
+	var b := _to_board(p)
 	for i in Rules.CELLS:
-		if Geometry2D.is_point_in_polygon(p, _polys[i]):
+		if Geometry2D.is_point_in_polygon(b, _polys[i]):
 			return i
 	return -1
 
@@ -446,19 +532,18 @@ func _start_pinch() -> void:
 
 ## 軽く押したとき：駒台の駒、盤の駒、行き先を選ぶ
 func _click(pos: Vector2) -> void:
-	# どの駒でも、押せば名前と動きを案内する（自分の番でなくても）
-	if not state.is_empty():
-		var ci := _cell_at(pos)
-		if ci >= 0 and state["board"][ci] != 0:
-			piece_tapped.emit(state["board"][ci])
-	if not _can_act():
-		return
+	# 駒台は盤の上に重なっているので先に調べる
 	for hit in _hand_hits:
 		if hit[0].has_point(pos):
-			if hit[1] == my_seat:
+			if hit[1] == my_seat and _can_act():
 				select_drop(hit[2])
 			return
 	var i := _cell_at(pos)
+	# どの駒でも、押せば名前と動きを案内する（自分の番でなくても）
+	if i >= 0 and not state.is_empty() and state["board"][i] != 0:
+		piece_tapped.emit(state["board"][i])
+	if not _can_act():
+		return
 	if i < 0:
 		clear_selection()
 		return
@@ -482,6 +567,6 @@ func _click(pos: Vector2) -> void:
 		targets = Rules.moves_from(state, my_seat, i)
 		Sfx.play("select")
 		selection_changed.emit()
-		queue_redraw()
+		_redraw()
 	else:
 		clear_selection()

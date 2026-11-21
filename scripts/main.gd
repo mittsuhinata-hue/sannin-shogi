@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.0"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.1"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -842,7 +842,8 @@ func _on_rematch() -> void:
 
 
 func _refresh_hands() -> void:
-	if Net.state.is_empty():
+	# 持ち駒は盤の駒台で見せるので、枠の中の持ち駒ボタンは作らない（軽くするため）
+	if Net.state.is_empty() or not _player_boxes[0]["hand"].visible:
 		return
 	var st := Net.state
 	var ctl := Net.controllable_seat()
