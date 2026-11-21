@@ -993,10 +993,109 @@ static func resign(state: Dictionary, pl: int) -> void:
 
 # ---------- コンピュータ ----------
 
+const CPU_LEVEL_NAMES := ["弱い", "ふつう", "強い"]
+
+## CPUの手を選ぶ。強さは state["cpu_level"]（0=弱い 1=ふつう 2=強い）
 static func cpu_choose(state: Dictionary, pl: int) -> Dictionary:
 	use(state)
-	if not CHECK_RULE:
-		return _cpu_big(state, pl)
+	var level: int = clampi(int(state.get("cpu_level", 1)), 0, 2)
+	var noise := 30.0 if level == 0 else 2.0
+	var list: Array = _cpu_big(state, pl, noise) if not CHECK_RULE else _cpu_scored(state, pl, noise)
+	if list.is_empty():
+		return {}
+	if level == 0 and randf() < 0.3:
+		return list.pick_random()["m"]   # 弱い：ときどき適当に指す
+	list.sort_custom(func(a, b): return a["s"] > b["s"])
+	if level < 2:
+		return list[0]["m"]
+	# 強い：よさそうな手をいくつか選び、指したあとの盤を詳しく見て決める
+	var keep := 14 if CELLS < 300 else 6
+	var best: Dictionary = list[0]["m"]
+	var best_score := -1e18
+	for e in list.slice(0, keep):
+		var sc := _deep_score(state, pl, e["m"])
+		if sc > best_score:
+			best_score = sc
+			best = e["m"]
+	return best
+
+## 駒ごとの「そのマスに利いている一番安い駒の値打ち」の表（3人分）
+static func _att_min(b: Array) -> Array:
+	var maps: Array = [{}, {}, {}]
+	for i in CELLS:
+		var c: int = b[i]
+		if c == 0:
+			continue
+		var v := piece_value(c)
+		var mp: Dictionary = maps[p_owner(c)]
+		for t in piece_targets(b, i):
+			if not mp.has(t) or mp[t] > v:
+				mp[t] = v
+	return maps
+
+## 指したあとの盤の点数：取られそうな駒の損・取れそうな駒の得・王手・詰み
+static func _deep_score(state: Dictionary, pl: int, m: Dictionary) -> float:
+	var board: Array = state["board"]
+	var alive: Array = state["alive"]
+	var b := _apply_board(board, pl, m)
+	var score := randf() * 0.5
+	var to: int = m["to"]
+	if m["drop"] < 0 and board[to] != 0:
+		var cap: int = board[to]
+		score += piece_value(cap) * 10.0
+		if is_royal(cap) and not CHECK_RULE:
+			score += 1000.0 if royal_cells(board, p_owner(cap)).size() <= 1 else 300.0
+	if m["promote"]:
+		score += 6.0
+	if m["drop"] >= 0:
+		score -= 1.0
+	var maps := _att_min(b)
+	var mine: Dictionary = maps[pl]
+	var worst := 0.0
+	var second := 0.0
+	var gain := 0.0
+	for i in CELLS:
+		var c: int = b[i]
+		if c == 0:
+			continue
+		var o := p_owner(c)
+		var v := float(piece_value(c))
+		if o == pl:
+			var att := 1e9
+			for e in 3:
+				if e != pl and alive[e] and maps[e].has(i):
+					att = minf(att, maps[e][i])
+			if att >= 1e9:
+				continue
+			if is_royal(c):
+				if CHECK_RULE:
+					continue
+				v = 300.0 if royal_cells(b, pl).size() <= 1 else 60.0
+			var loss := v if not mine.has(i) else maxf(0.0, v - att)
+			if loss > worst:
+				second = worst
+				worst = loss
+			elif loss > second:
+				second = loss
+		elif alive[o] and mine.has(i):
+			if is_royal(c) and CHECK_RULE:
+				continue
+			var g := v if not maps[o].has(i) else maxf(0.0, v - float(mine[i]))
+			gain = maxf(gain, g)
+	score -= (worst + second * 0.4) * 9.0
+	score += gain * 2.0
+	if CHECK_RULE:
+		for o in 3:
+			if o != pl and alive[o] and in_check(b, o, alive):
+				score += 4.0
+				var s2 := state.duplicate()
+				s2["board"] = b
+				if not has_legal_move(s2, o):
+					score += 5000.0   # 詰ませられる
+	return score
+
+## ふつうのCPUの手の点数づけ（王手のある種類）。[{"s": 点数, "m": 手}, ...] を返す
+static func _cpu_scored(state: Dictionary, pl: int, noise: float) -> Array:
 	var moves: Array = []
 	var board0: Array = state["board"]
 	for i in CELLS:
@@ -1008,13 +1107,10 @@ static func cpu_choose(state: Dictionary, pl: int) -> Dictionary:
 		drops.append_array(drops_of(state, pl, k))
 	drops.shuffle()
 	moves.append_array(drops.slice(0, 25))
-	if moves.is_empty():
-		return {}
+	var out: Array = []
 	var board: Array = state["board"]
-	var best: Dictionary = moves[0]
-	var best_score := -99999.0
 	for m in moves:
-		var score := randf() * 2.0
+		var score := randf() * noise
 		var b := _apply_board(board, pl, m)
 		var to: int = m["to"]
 		var moved: int = b[to]
@@ -1031,21 +1127,18 @@ static func cpu_choose(state: Dictionary, pl: int) -> Dictionary:
 				score += 4.0
 		if m["drop"] >= 0:
 			score -= 1.0
-		if score > best_score:
-			best_score = score
-			best = m
-	return best
+		out.append({"s": score, "m": m})
+	return out
 
 ## 大きい盤用の速いCPU：相手の利きの表を1回だけ作り、取る・逃げる・取られないを見る
-static func _cpu_big(state: Dictionary, pl: int) -> Dictionary:
+static func _cpu_big(state: Dictionary, pl: int, noise: float = 2.0) -> Array:
 	var board: Array = state["board"]
 	var maps := attack_maps(board)
 	var danger := {}
 	for o in 3:
 		if o != pl and state["alive"][o]:
 			danger.merge(maps[o])
-	var best := {}
-	var best_score := -1e9
+	var out: Array = []
 	for i in CELLS:
 		var c: int = board[i]
 		if c == 0 or p_owner(c) != pl:
@@ -1053,7 +1146,7 @@ static func _cpu_big(state: Dictionary, pl: int) -> Dictionary:
 		var val := piece_value(c)
 		var k := p_kind(c)
 		for t in piece_targets(board, i):
-			var score := randf() * 2.0
+			var score := randf() * noise
 			var cap: int = board[t]
 			if cap != 0:
 				score += piece_value(cap) * 10.0 + (1000.0 if is_royal(cap) else 0.0)
@@ -1065,7 +1158,5 @@ static func _cpu_big(state: Dictionary, pl: int) -> Dictionary:
 			if not p_prom(c) and can_promote(k) and (in_zone(pl, i) or in_zone(pl, t)):
 				prom = true
 				score += 4.0
-			if score > best_score:
-				best_score = score
-				best = {"from": i, "to": t, "drop": -1, "promote": prom}
-	return best
+			out.append({"s": score, "m": {"from": i, "to": t, "drop": -1, "promote": prom}})
+	return out

@@ -53,8 +53,9 @@ var rejoined := false     ## つなぎ直して席に戻った直後（開始の
 
 var main_sec := 0          ## 持ち時間（秒、0 = なし）。部屋を作った人の設定
 var byo_sec := 0           ## 秒読み（秒、0 = なし）
-var room_clock: Array = [0, 0, "standard"]  ## いる部屋の [持ち時間, 秒読み, 種類]（部屋を作った人が決める）
+var room_clock: Array = [0, 0, "standard", 1]  ## いる部屋の [持ち時間, 秒読み, 種類, CPUの強さ]（部屋を作った人が決める）
 var variant_id := "standard"     ## この端末で選んでいる将棋の種類
+var cpu_level := 1               ## CPUの強さ（0=弱い 1=ふつう 2=強い）
 var _recv_time := 0.0      ## 盤面を受け取った時刻（考え中の時間の計算用）
 
 
@@ -161,14 +162,14 @@ func _clean_name(n: String) -> String:
 
 
 @rpc("any_peer", "reliable")
-func _create_room(player_name: String, main: int = 0, byo: int = 0, token: String = "", variant: String = "standard") -> void:
+func _create_room(player_name: String, main: int = 0, byo: int = 0, token: String = "", variant: String = "standard", level: int = 1) -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
 	_server_leave_room(id)
 	var code := _new_code()
 	_rooms[code] = {"code": code, "members": [], "owner": id, "seats": [], "state": {}, "in_game": false, "cpu_at": 0.0,
-		"clock": _rules_of(main, byo, variant)}
+		"clock": _rules_of(main, byo, variant, level)}
 	_server_join(id, code, player_name, token)
 
 
@@ -212,21 +213,21 @@ func _send_members(room: Dictionary) -> void:
 		_members_update.rpc_id(m["id"], room["members"], room["owner"], room["in_game"], room.get("clock", _rules_of(0, 0, "standard")))
 
 
-## 部屋の決まり [持ち時間, 秒読み, 将棋の種類]
-static func _rules_of(main: int, byo: int, variant: String) -> Array:
-	return [clampi(main, 0, 7200), clampi(byo, 0, 600), variant if Rules.is_variant(variant) else "standard"]
+## 部屋の決まり [持ち時間, 秒読み, 将棋の種類, CPUの強さ]
+static func _rules_of(main: int, byo: int, variant: String, level: int = 1) -> Array:
+	return [clampi(main, 0, 7200), clampi(byo, 0, 600), variant if Rules.is_variant(variant) else "standard", clampi(level, 0, 2)]
 
 
 ## 部屋を作った人が、対局前に持ち時間・秒読み・将棋の種類を変える
 @rpc("any_peer", "reliable")
-func _set_clock(main: int, byo: int, variant: String = "standard") -> void:
+func _set_clock(main: int, byo: int, variant: String = "standard", level: int = 1) -> void:
 	if mode != Mode.SERVER:
 		return
 	var id := multiplayer.get_remote_sender_id()
 	var room := _room_of(id)
 	if room.is_empty() or room["owner"] != id or room["in_game"]:
 		return
-	room["clock"] = _rules_of(main, byo, variant)
+	room["clock"] = _rules_of(main, byo, variant, level)
 	_send_members(room)
 
 
@@ -255,11 +256,12 @@ func _start_room() -> void:
 			seats_new.append({"id": mid, "name": room["members"][i]["name"], "base": room["members"][i]["name"]})
 			seat_tokens.append(room.get("tokens", {}).get(mid, ""))
 		else:
-			seats_new.append({"id": ID_CPU, "name": "CPU%d" % i})
+			seats_new.append({"id": ID_CPU, "name": "CPU%d（%s）" % [i, Rules.CPU_LEVEL_NAMES[clampi(int(clock[3]) if clock.size() > 3 else 1, 0, 2)]]})
 			seat_tokens.append("")
 	room["seats"] = seats_new
 	room["seat_tokens"] = seat_tokens   # 席ごとの合言葉（サーバーだけが持つ）
 	room["state"] = Rules.new_game(vid)
+	room["state"]["cpu_level"] = int(clock[3]) if clock.size() > 3 else 1
 	_init_clock(room["state"], main, byo)
 	Rules.pick_first(room["state"], _seat_names(seats_new))
 	room["in_game"] = true
@@ -591,7 +593,7 @@ func _open_peer(url: String) -> bool:
 
 func create_room(url: String, player_name: String) -> void:
 	my_name = player_name
-	_connect(url, func(): _create_room.rpc_id(1, my_name, main_sec, byo_sec, _token, variant_id))
+	_connect(url, func(): _create_room.rpc_id(1, my_name, main_sec, byo_sec, _token, variant_id, cpu_level))
 
 
 func join_room(url: String, code: String, player_name: String) -> void:
@@ -702,7 +704,7 @@ func set_clock(main: int, byo: int) -> void:
 	main_sec = main
 	byo_sec = byo
 	if is_owner() and not in_game:
-		_set_clock.rpc_id(1, main, byo, variant_id)
+		_set_clock.rpc_id(1, main, byo, variant_id, cpu_level)
 
 
 @rpc("authority", "reliable")
@@ -755,10 +757,11 @@ func start_local(humans: int, player_name: String) -> void:
 			var nm := player_name if humans == 1 else Rules.player_name_default(i)
 			seats.append({"id": ID_LOCAL, "name": nm})
 		else:
-			seats.append({"id": ID_CPU, "name": "CPU%d" % i})
+			seats.append({"id": ID_CPU, "name": "CPU%d（%s）" % [i, Rules.CPU_LEVEL_NAMES[clampi(cpu_level, 0, 2)]]})
 	my_seat = 0 if humans == 1 else -1
 	in_game = true
 	_local_room = {"members": [], "seats": seats, "state": Rules.new_game(variant_id), "cpu_at": 0.0}
+	_local_room["state"]["cpu_level"] = cpu_level
 	_init_clock(_local_room["state"], main_sec, byo_sec)
 	Rules.pick_first(_local_room["state"], _seat_names(seats))
 	state = _local_room["state"]

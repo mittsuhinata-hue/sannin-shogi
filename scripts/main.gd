@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.2"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.3"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -38,6 +38,8 @@ var _byo_opt: OptionButton
 var _variant_opt: OptionButton
 var _players_opt: OptionButton
 var _hotseat_btn: Button
+var _solo_btn: Button
+var _level_opt: OptionButton
 var _variant_note: Label
 var _piece_info: Label
 var _clock_row: Control
@@ -69,6 +71,8 @@ func _select_clock(clock: Array) -> void:
 		if vi >= 0:
 			_variant_opt.selected = vi
 		_players_opt.selected = 1 if vid.ends_with("_2p") else 0
+	if clock.size() > 3:
+		_level_opt.selected = clampi(int(clock[3]), 0, 2)
 	_update_variant_labels()
 
 
@@ -76,6 +80,7 @@ func _apply_clock_setting() -> void:
 	Net.main_sec = MAIN_TIMES[_main_opt.selected][1]
 	Net.byo_sec = BYO_TIMES[_byo_opt.selected][1]
 	Net.variant_id = Rules.variant_id_for(Rules.VARIANT_ORDER[_variant_opt.selected], 2 if _players_opt.selected == 1 else 3)
+	Net.cpu_level = _level_opt.selected
 	_update_variant_labels()
 
 
@@ -89,6 +94,8 @@ func _update_variant_labels() -> void:
 	_variant_note.text = Rules.variant_info(cur)["note"]
 	if _hotseat_btn:
 		_hotseat_btn.text = "1台で2人" if two else "1台で3人"
+	if _solo_btn:
+		_solo_btn.text = "ひとりで（CPU 1人と）" if two else "ひとりで（CPU 2人と）"
 var _promo: ConfirmationDialog
 var _promo_moves: Array = []
 
@@ -199,6 +206,7 @@ func _load_settings() -> void:
 		_byo_opt.selected = clampi(cf.get_value("main", "byo_index", 0), 0, BYO_TIMES.size() - 1)
 		_variant_opt.selected = clampi(cf.get_value("main", "variant_index", 0), 0, Rules.VARIANT_ORDER.size() - 1)
 		_players_opt.selected = clampi(cf.get_value("main", "players_index", 0), 0, 1)
+		_level_opt.selected = clampi(cf.get_value("main", "cpu_level", 1), 0, 2)
 	_apply_clock_setting()
 
 
@@ -210,6 +218,7 @@ func _save_settings() -> void:
 	cf.set_value("main", "byo_index", _byo_opt.selected)
 	cf.set_value("main", "variant_index", _variant_opt.selected)
 	cf.set_value("main", "players_index", _players_opt.selected)
+	cf.set_value("main", "cpu_level", _level_opt.selected)
 	cf.save(SETTINGS_PATH)
 
 
@@ -267,6 +276,8 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_auto = true
 		elif a.begins_with("--variant="):
 			Net.variant_id = a.substr(10)
+		elif a.begins_with("--level="):
+			Net.cpu_level = int(a.substr(8))
 		elif a.begins_with("--main="):
 			Net.main_sec = int(a.substr(7))
 		elif a.begins_with("--byo="):
@@ -424,11 +435,21 @@ func _build_lobby() -> void:
 		_apply_clock_setting()
 		Net.set_clock(Net.main_sec, Net.byo_sec)
 		_save_settings())
+	# CPUの強さ
+	_level_opt = OptionButton.new()
+	for nm in Rules.CPU_LEVEL_NAMES:
+		_level_opt.add_item(nm)
+	_level_opt.selected = 1
+	_level_opt.item_selected.connect(func(_i):
+		_apply_clock_setting()
+		Net.set_clock(Net.main_sec, Net.byo_sec)
+		_save_settings())
 	var rules_box := VBoxContainer.new()
 	rules_box.add_child(_row("人数", _players_opt))
 	rules_box.add_child(_row("種類", _variant_opt))
 	rules_box.add_child(_variant_note)
 	rules_box.add_child(_row("持ち時間", th_row))
+	rules_box.add_child(_row("CPUの強さ", _level_opt))
 	_clock_row = rules_box
 
 	# --- 部屋に入る前 ---
@@ -453,7 +474,8 @@ func _build_lobby() -> void:
 	entry.add_child(HSeparator.new())
 	var hb3 := HBoxContainer.new()
 	hb3.add_theme_constant_override("separation", 10)
-	hb3.add_child(_btn("ひとりで（CPU 2人と）", func(): Net.start_local(1, _player_name())))
+	_solo_btn = _btn("ひとりで（CPU 2人と）", func(): Net.start_local(1, _player_name()))
+	hb3.add_child(_solo_btn)
 	_hotseat_btn = _btn("1台で3人", func(): Net.start_local(3, _player_name()))
 	hb3.add_child(_hotseat_btn)
 	entry.add_child(hb3)
@@ -585,11 +607,12 @@ func _show_lobby() -> void:
 	if in_room:
 		_select_clock(Net.room_clock)
 	else:
-		_select_clock([Net.main_sec, Net.byo_sec, Net.variant_id])
+		_select_clock([Net.main_sec, Net.byo_sec, Net.variant_id, Net.cpu_level])
 	_main_opt.disabled = in_room and not Net.is_owner()
 	_byo_opt.disabled = _main_opt.disabled
 	_variant_opt.disabled = _main_opt.disabled
 	_players_opt.disabled = _main_opt.disabled
+	_level_opt.disabled = _main_opt.disabled
 	_copy_btn.text = "招待リンクをコピー" if OS.has_feature("web") else "部屋コードをコピー"
 
 
