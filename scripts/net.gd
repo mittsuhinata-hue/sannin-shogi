@@ -93,7 +93,10 @@ static func fmt_time(sec: float) -> String:
 static func _init_clock(st: Dictionary, main: int, byo: int) -> void:
 	st["main"] = clampi(main, 0, 7200)
 	st["byo"] = clampi(byo, 0, 600)
-	st["bank"] = [float(st["main"]), float(st["main"]), float(st["main"])]
+	var bank: Array = []
+	for _p in st["alive"].size():
+		bank.append(float(st["main"]))
+	st["bank"] = bank
 
 
 static func has_clock(st: Dictionary) -> bool:
@@ -189,7 +192,7 @@ func _join_room(code: String, player_name: String, token: String = "") -> void:
 	if room["in_game"]:
 		_error.rpc_id(id, "部屋 %s はもう対局中です" % code)
 		return
-	if room["members"].size() >= 3:
+	if room["members"].size() >= Rules.SEATS_MAX:
 		_error.rpc_id(id, "部屋 %s は満員です" % code)
 		return
 	_server_leave_room(id)
@@ -244,10 +247,10 @@ func _start_room() -> void:
 	var main: int = clock[0]
 	var byo: int = clock[1]
 	var vid: String = str(clock[2]) if clock.size() > 2 else "standard"
-	var players := 2 if Rules.variant_info(vid).get("rect", false) else 3
+	var players := Rules.players_of(vid)
 	var seats_new: Array = []
 	var seat_tokens: Array = []
-	for i in 3:
+	for i in maxi(players, 3):
 		if i >= players:
 			seats_new.append({"id": ID_CPU, "name": "（なし）"})   # 1対1の3人目の席（使わない）
 			seat_tokens.append("")
@@ -748,9 +751,9 @@ func start_local(humans: int, player_name: String) -> void:
 	mode = Mode.LOCAL
 	my_name = player_name
 	seats = []
-	var players := 2 if Rules.variant_info(variant_id).get("rect", false) else 3
+	var players := Rules.players_of(variant_id)
 	humans = mini(humans, players)
-	for i in 3:
+	for i in maxi(players, 3):
 		if i >= players:
 			seats.append({"id": ID_CPU, "name": "（なし）"})   # 1対1の3人目の席（使わない）
 		elif i < humans:

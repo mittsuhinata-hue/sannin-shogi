@@ -17,7 +17,7 @@ func _init() -> void:
 			var a := Rules.step(Rules.cell_h(i), Rules.cell_r(i), Rules.cell_f(i), d[0], d[1])
 			if a.is_empty():
 				continue
-			if a[0] == 3:
+			if a[0] == Rules.CH:
 				# 中央に入れるなら、中央の玉からも戻ってこられる
 				var found := false
 				for o in 3:
@@ -140,13 +140,14 @@ func _init() -> void:
 	# 2b. 将棋の種類ごとに：盤の形・3人の手の数がそろうか・CPUが指し続けられるか
 	var all_ids: Array = Rules.VARIANT_ORDER.duplicate()
 	for vid0 in Rules.VARIANT_ORDER:
-		all_ids.append(vid0 + "_2p")
+		for np in [2, 4, 5]:
+			all_ids.append(Rules.variant_id_for(vid0, np))
 	for vid in all_ids:
 		var vs := Rules.new_game(vid)
 		for i in (0 if Rules.RECT else Rules.CENTER):
 			for d in Rules.KING_STEPS:
 				var a := Rules.step(Rules.cell_h(i), Rules.cell_r(i), Rules.cell_f(i), d[0], d[1])
-				if a.is_empty() or a[0] == 3:
+				if a.is_empty() or a[0] == Rules.CH:
 					continue
 				var b := Rules.step(a[0], a[1], a[2], -a[3], -a[4])
 				check(not b.is_empty() and Rules.idx(b[0], b[1], b[2]) == i, "%s: 戻れない %d" % [vid, i])
@@ -175,7 +176,7 @@ func _init() -> void:
 		print("%s: マス%d 駒%d 初手の数%s 60手 %dms（1手最大%dms） 最後=%s" % [vid, Rules.CELLS, pieces, str(cnt), Time.get_ticks_msec() - t0, worst, vs["log"][-1]])
 	Rules.set_variant("standard")
 	# 3. CPU同士で最後まで
-	var wins := [0, 0, 0, 0]
+	var wins := {}
 	for g in 2:
 		seed(g)
 		st = Rules.new_game()
@@ -194,7 +195,7 @@ func _init() -> void:
 			# 盤と持ち駒の駒数が増えたり減ったりしていないか（脱落者以外）
 			n += 1
 		if st["winner"] >= 0:
-			wins[st["winner"]] += 1
+			wins[st["winner"]] = wins.get(st["winner"], 0) + 1
 		print("対局%d: %d手 勝者=%d 時間=%dms 1手最大=%dms" % [g, n, st["winner"], Time.get_ticks_msec() - t0, worst])
 		var tail: Array = st["log"]
 		print("   最後: ", tail.slice(max(0, tail.size() - 3)))

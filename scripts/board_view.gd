@@ -14,8 +14,8 @@ signal promotion_choice(m_no: Dictionary, m_yes: Dictionary)
 signal selection_changed
 signal piece_tapped(c: int)
 
-const PLAYER_COLORS := [Color(0.80, 0.15, 0.15), Color(0.15, 0.30, 0.85), Color(0.10, 0.55, 0.20)]
-const HALF_TINT := [Color(0.93, 0.80, 0.60), Color(0.88, 0.80, 0.66), Color(0.90, 0.84, 0.62)]
+const PLAYER_COLORS := [Color(0.80, 0.15, 0.15), Color(0.15, 0.30, 0.85), Color(0.10, 0.55, 0.20), Color(0.78, 0.58, 0.02), Color(0.55, 0.20, 0.70)]
+const HALF_TINT := [Color(0.93, 0.80, 0.60), Color(0.88, 0.80, 0.66), Color(0.90, 0.84, 0.62), Color(0.94, 0.86, 0.58), Color(0.90, 0.80, 0.68)]
 const CENTER_TINT := Color(0.86, 0.74, 0.55)
 const LINE_COL := Color(0.25, 0.15, 0.05)
 const HAND_ORDER := [6, 5, 4, 3, 2, 1, 0]  # 飛 角 金 銀 桂 香 歩
@@ -23,7 +23,7 @@ const HAND_ORDER := [6, 5, 4, 3, 2, 1, 0]  # 飛 角 金 銀 桂 香 歩
 var state: Dictionary = {}
 var view_seat := 0        ## 下に来る人
 var my_seat := -1         ## いま操作できる人（-1 なら操作できない）
-var names: Array = ["赤", "青", "緑"]
+var names: Array = ["赤", "青", "緑", "黄", "紫"]
 
 var selected_from := -1
 var selected_drop := -1
@@ -126,6 +126,14 @@ func _apply_view() -> void:
 		_layer.position = _center + _pan - _center * _zoom
 	if _zoom_bar:
 		_zoom_bar.position = Vector2(6, size.y - _zoom_bar.size.y - 6)
+		if _tall_many():
+			# 縦画面の4人・5人は左下にも駒台を置くので、ボタンは下の真ん中へ
+			_zoom_bar.position.x = (size.x - _zoom_bar.size.x) * 0.5
+
+
+## 縦画面で、下の段にも相手の駒台を置く人数か
+func _tall_many() -> bool:
+	return _is_tall() and not Rules.RECT and Rules.N >= 4
 
 
 func reset_zoom() -> void:
@@ -205,18 +213,33 @@ func _can_act() -> bool:
 
 # ---------- 形の計算（拡大1倍の座標） ----------
 
+## 盤のふちの多角形（人数×2 角形）の頂点 j。陣地 h の奥の辺は頂点 2h〜2h+1
 func _hex_v(j: int) -> Vector2:
-	var a0 := deg_to_rad(90.0 + (2 * view_seat + 0.5) * 60.0)
-	var a := a0 - deg_to_rad(60.0) * posmod(j, 6)
+	var n := Rules.N
+	var stp := 180.0 / n
+	var a0 := deg_to_rad(90.0 + (2 * view_seat + 0.5) * stp)
+	var a := a0 - deg_to_rad(stp) * posmod(j, 2 * n)
 	return _center + _radius * Vector2(cos(a), sin(a))
+
+## 半径1の盤のふちの、横・縦の半分の幅（盤を画面に収める大きさの計算用）
+func _poly_extent() -> Vector2:
+	var n := Rules.N
+	var stp := 180.0 / n
+	var a0 := deg_to_rad(90.0 + (2 * view_seat + 0.5) * stp)
+	var ex := Vector2.ZERO
+	for j in 2 * n:
+		var a := a0 - deg_to_rad(stp) * j
+		ex.x = max(ex.x, abs(cos(a)))
+		ex.y = max(ex.y, abs(sin(a)))
+	return ex
 
 func _hex_m(j: int) -> Vector2:
 	return (_hex_v(j) + _hex_v(j + 1)) * 0.5
 
 ## 中央の三角形の頂点（h と h+1 の境目の上）。真ん中の筋の幅がほかの筋とそろう大きさにする
 func _q(h: int) -> Vector2:
-	var m := _hex_m(2 * posmod(h, 3) + 1)
-	var d := _radius * 0.866 / (1.732 * Rules.MID + 1.0)
+	var m := _hex_m(2 * posmod(h, Rules.N) + 1)
+	var d := _radius * cos(PI / (2 * Rules.N)) / (2.0 * sin(PI / Rules.N) * Rules.MID + 1.0)
 	return _center + (m - _center).normalized() * d
 
 ## 陣地 h の (筋u, 段v) 座標 → 盤上の点。u:0..FILES, v:0..RANKS
@@ -239,6 +262,8 @@ func _pt(h: int, u: float, v: float) -> Vector2:
 func _hand_metrics() -> Array:
 	var base: float = size.x * 0.075 if _is_tall() else size.y * 0.05
 	var slot: float = clamp(base, 22.0, 40.0)
+	if _is_tall() and not Rules.RECT and Rules.N >= 5:
+		slot = min(slot, (size.x / 3.0 - 20.0) / 5.0)   # 上に3人分並べる
 	var step_x := slot * 1.25
 	return [slot, step_x, step_x * 4 + 12.0, 24.0 + slot * 2 + 10.0]
 
@@ -317,14 +342,20 @@ func _rebuild() -> void:
 		_apply_view()
 		_redraw()
 		return
+	var ex := _poly_extent()
 	if _is_tall() and Rules.DROPS:
 		var band: float = _hand_metrics()[3] + 6.0
 		var area_h := size.y - band * 2.0
 		_center = Vector2(size.x * 0.5, band + area_h * 0.5)
-		_radius = min(size.x / 2.0, area_h / 1.732) * 0.97
+		_radius = min(size.x / (2.0 * ex.x), area_h / (2.0 * ex.y)) * 0.97
+	elif Rules.N >= 5 and Rules.DROPS:
+		# 5人：駒台を左右の真ん中にも置くので、その分あけて盤を置く
+		var side: float = _hand_metrics()[2] + 10.0
+		_center = size * 0.5
+		_radius = min((size.x - side * 2.0) / (2.0 * ex.x), size.y / (2.0 * ex.y)) * 0.97
 	else:
 		_center = size * 0.5
-		_radius = min(size.x / 2.0, size.y / 1.732) * (0.90 if Rules.DROPS else 0.97)
+		_radius = min(size.x / (2.0 * ex.x), size.y / (2.0 * ex.y)) * (0.90 if Rules.DROPS else 0.97)
 	_polys.clear()
 	_centers.clear()
 	_sizes.clear()
@@ -336,7 +367,9 @@ func _rebuild() -> void:
 		var poly: PackedVector2Array
 		var c: Vector2
 		if i == Rules.CENTER:
-			poly = PackedVector2Array([_q(0), _q(1), _q(2)])
+			poly = PackedVector2Array()
+			for h in Rules.N:
+				poly.append(_q(h))
 			c = _center
 		else:
 			var h := Rules.cell_h(i)
@@ -364,7 +397,7 @@ func _rebuild() -> void:
 			m *= 0.75
 		_sizes.append(m)
 	_outline = PackedVector2Array()
-	for j in 7:
+	for j in 2 * Rules.N + 1:
 		_outline.append(_hex_v(j))
 	_apply_view()
 	_redraw()
@@ -430,8 +463,8 @@ func draw_board(cv: CanvasItem) -> void:
 			var yy: float = _rect_origin.y + rr * _rect_cell
 			cv.draw_line(Vector2(_rect_origin.x, yy), Vector2(_rect_origin.x + w, yy), LINE_COL, 2.2)
 	else:
-		# 3人の陣地の境目だけ少し太く
-		for h in 3:
+		# 陣地の境目だけ少し太く
+		for h in Rules.N:
 			cv.draw_line(_hex_m(2 * h + 1), _q(h), LINE_COL, 2.5)
 	var closed := _outline.duplicate()
 	cv.draw_polyline(closed, Color(0.2, 0.1, 0.0), 4.0)
@@ -492,12 +525,25 @@ func _draw_hands() -> void:
 		# 取った駒を使わない種類：駒台は出さず、名前の札だけ出す
 		w = 150.0
 		h = 28.0
-	var spots := {
-		view_seat: Vector2(size.x - w - 6, size.y - h - 6),
-		(view_seat + 1) % 3: Vector2(size.x - w - 6, 6),
-		(view_seat + 2) % 3: Vector2(6, 6),
-	}
-	for p in 3:
+	var ns := Rules.NSEAT
+	var vs := clampi(view_seat, 0, ns - 1)
+	var br := Vector2(size.x - w - 6, size.y - h - 6)
+	var tr := Vector2(size.x - w - 6, 6)
+	var tl := Vector2(6, 6)
+	var bl := Vector2(6, size.y - h - 6 - (0.0 if _tall_many() else 44.0))   # 横画面の左下は拡大ボタンをよける
+	var spots := {}
+	if ns == 3:
+		spots = {vs: br, (vs + 1) % 3: tr, (vs + 2) % 3: tl}
+	elif ns == 4:
+		spots = {vs: br, (vs + 1) % 4: tr, (vs + 2) % 4: tl, (vs + 3) % 4: bl}
+	else:
+		# 5人：自分は右下、右どなりから左回りに並べる
+		var second := Vector2(size.x * 0.5 - w * 0.5, 6) if _is_tall() else Vector2(size.x - w - 6, size.y * 0.5 - h * 0.5)
+		if _is_tall():
+			spots = {vs: br, (vs + 1) % 5: tr, (vs + 2) % 5: second, (vs + 3) % 5: tl, (vs + 4) % 5: bl}
+		else:
+			spots = {vs: br, (vs + 1) % 5: second, (vs + 2) % 5: tr, (vs + 3) % 5: tl, (vs + 4) % 5: bl}
+	for p in ns:
 		if p >= Rules.PLAYERS:
 			continue   # 1対1では3人目の席は出さない
 		var origin: Vector2 = spots[p]

@@ -6,7 +6,7 @@ extends RefCounted
 ##   r=0 が自分の一番奥（玉のいる段）、r=TOP が中央に接する段。
 ##   f<MID の先は左隣 (h+2) の陣地、f>MID の先は右隣 (h+1) の陣地。
 ##   真ん中の f=MID の先は、盤の中心にある三角形のマス「中央」。
-## マス番号 = h*HALF + r*FILES + f、中央 = 3*HALF
+## マス番号 = h*HALF + r*FILES + f、中央 = N*HALF（N は陣地の数＝人数。3〜5人）
 ##
 ## 将棋の種類（標準・ミニ・大きめ・大局将棋風）は VARIANTS で決める。
 ## 対局ごとに state["variant"] を持ち、計算の前に use(state) で切り替える。
@@ -203,6 +203,12 @@ const VARIANTS_2P := {
 
 static var RECT := false       ## 四角い盤（1対1）か
 static var PLAYERS := 3        ## 遊ぶ人数（1対1なら 2。席は3つのままで3人目は空き）
+static var N := 3              ## 多角形の盤の陣地の数（3〜5）
+static var NSEAT := 3          ## 席の数（state の alive・hands の長さ）。1対1は3、それ以外は人数と同じ
+const SEATS_MAX := 5           ## 席の数の最大（駒の番号の付け方に使う）
+const CH := 9                  ## 居場所 [h, ...] の h がこれなら「中央のマス」
+const RH := 8                  ## 居場所 [h, ...] の h がこれなら「四角い盤」
+const PLAYER_COUNTS := [2, 3, 4, 5]
 
 static func all_variants() -> Dictionary:
 	var d := VARIANTS.duplicate()
@@ -210,14 +216,23 @@ static func all_variants() -> Dictionary:
 	return d
 
 static func is_variant(id: String) -> bool:
-	return VARIANTS.has(id) or VARIANTS_2P.has(id)
+	return VARIANTS.has(id) or VARIANTS_2P.has(id) or ((id.ends_with("_4p") or id.ends_with("_5p")) and VARIANTS.has(base_of(id)))
 
-## 三人用の種類と人数から、種類のIDを作る（例：standard + 2人 → standard_2p）
+## 三人用の種類と人数から、種類のIDを作る（例：standard + 2人 → standard_2p、4人 → standard_4p）
 static func variant_id_for(base: String, players: int) -> String:
-	return base + "_2p" if players == 2 else base
+	if players == 3:
+		return base
+	return "%s_%dp" % [base, players]
 
 static func base_of(id: String) -> String:
-	return id.trim_suffix("_2p")
+	return id.trim_suffix("_2p").trim_suffix("_4p").trim_suffix("_5p")
+
+## 種類のIDから人数
+static func players_of(id: String) -> int:
+	for n in [2, 4, 5]:
+		if id.ends_with("_%dp" % n):
+			return n
+	return 3
 
 # いまの種類の決まり（use / set_variant で切り替わる）
 static var VARIANT_ID := ""
@@ -233,7 +248,7 @@ static var DROPS := true     ## 取った駒を打てるか
 static var CHECK_RULE := true  ## 王手放置が反則か（false なら玉を取ったら勝ち）
 
 const MAX_MOVES := 600
-const DRAW := 3   ## winner がこの値なら引き分け（0..2 は勝者、-1 は対局中）
+const DRAW := 9   ## winner がこの値なら引き分け（0..4 は勝者、-1 は対局中）
 
 static var _ver := 0           ## 盤が変わるたびに増える（利きの表の作り直し判定用）
 static var _att_board = null
@@ -249,7 +264,9 @@ static func set_variant(id: String) -> void:
 	var v: Dictionary = variant_info(id)
 	VARIANT_ID = id
 	RECT = v.get("rect", false)
-	PLAYERS = 2 if RECT else 3
+	N = players_of(id) if not RECT else 3
+	PLAYERS = 2 if RECT else N
+	NSEAT = 3 if RECT else N
 	FILES = v["files"]
 	RANKS = v["ranks"]
 	TOP = RANKS - 1
@@ -261,7 +278,7 @@ static func set_variant(id: String) -> void:
 		CENTER = -1   # 中央のマスはない
 	else:
 		HALF = FILES * RANKS
-		CENTER = 3 * HALF
+		CENTER = N * HALF
 		CELLS = CENTER + 1
 	ZONE = v["zone"]
 	DROPS = v["drops"]
@@ -271,11 +288,23 @@ static func set_variant(id: String) -> void:
 static func use(state: Dictionary) -> void:
 	set_variant(str(state.get("variant", "standard")))
 
+static var _vcache := {}
+
 static func variant_info(id: String = "") -> Dictionary:
 	var key := id if id != "" else VARIANT_ID
 	if VARIANTS_2P.has(key):
 		return VARIANTS_2P[key]
-	return VARIANTS.get(key, VARIANTS["standard"])
+	if VARIANTS.has(key):
+		return VARIANTS[key]
+	if is_variant(key):
+		# 4人・5人用は三人用と同じ中身で、陣地の数だけ変える
+		if not _vcache.has(key):
+			var v: Dictionary = VARIANTS[base_of(key)].duplicate()
+			v["players"] = players_of(key)
+			v["zoom"] = float(v["zoom"]) * (1.25 if v["players"] == 4 else 1.5)
+			_vcache[key] = v
+		return _vcache[key]
+	return VARIANTS["standard"]
 
 static func _rows_of(v: Dictionary) -> Array:
 	if v.has("rows"):
@@ -292,7 +321,7 @@ static func _rows_of(v: Dictionary) -> Array:
 # ---------- マスと駒の番号 ----------
 
 static func idx(h: int, r: int, f: int) -> int:
-	if h == 3:
+	if h == CH:
 		return CENTER
 	return h * HALF + r * FILES + f
 
@@ -305,18 +334,18 @@ static func cell_r(i: int) -> int:
 static func cell_f(i: int) -> int:
 	return i % FILES
 
-## 駒の番号：1 + 持ち主 + 3×(種類×2 + 成り)
+## 駒の番号：1 + 持ち主 + 5×(種類×2 + 成り)
 static func make_piece(owner: int, kind: int, promoted: bool) -> int:
-	return 1 + owner + 3 * (kind * 2 + (1 if promoted else 0))
+	return 1 + owner + SEATS_MAX * (kind * 2 + (1 if promoted else 0))
 
 static func p_owner(c: int) -> int:
-	return (c - 1) % 3
+	return (c - 1) % SEATS_MAX
 
 static func p_kind(c: int) -> int:
-	return ((c - 1) / 3) / 2
+	return ((c - 1) / SEATS_MAX) / 2
 
 static func p_prom(c: int) -> bool:
-	return ((c - 1) / 3) % 2 == 1
+	return ((c - 1) / SEATS_MAX) % 2 == 1
 
 ## その駒がいま従う動きの決まり（成っていれば成った先の駒の動き）
 static func move_def(kind: int, prom: bool) -> Dictionary:
@@ -372,14 +401,16 @@ static func new_game(variant: String = "standard") -> Dictionary:
 					board[r * FILES + f] = make_piece(0, row[f], false)
 					board[(RANKS - 1 - r) * FILES + (FILES - 1 - f)] = make_piece(1, row[f], false)
 	else:
-		for p in 3:
+		for p in N:
 			for r in rows.size():
 				var row: Array = rows[r]
 				for f in FILES:
 					if row[f] >= 0:
 						board[idx(p, r, f)] = make_piece(p, row[f], false)
 	var hands: Array = []
-	for p in 3:
+	var alive: Array = []
+	for p in NSEAT:
+		alive.append(p < PLAYERS)   # 1対1では3人目の席は最初から空き
 		var hnd: Array = []
 		hnd.resize(HAND_KINDS)
 		hnd.fill(0)
@@ -389,7 +420,7 @@ static func new_game(variant: String = "standard") -> Dictionary:
 		"board": board,
 		"hands": hands,
 		"turn": 0,
-		"alive": [true, true, not RECT],   # 1対1では3人目の席は最初から空き
+		"alive": alive,
 		"winner": -1,
 		"last_from": -1,
 		"last_to": -1,
@@ -401,7 +432,7 @@ static func new_game(variant: String = "standard") -> Dictionary:
 ## 先手をくじ引きで決める
 static func pick_first(state: Dictionary, names: Array) -> void:
 	var seats_alive: Array = []
-	for p in 3:
+	for p in state["alive"].size():
 		if state["alive"][p]:
 			seats_alive.append(p)
 	var t: int = seats_alive[randi() % seats_alive.size()]
@@ -416,7 +447,7 @@ static func copy_state(s: Dictionary) -> Dictionary:
 
 ## (dr, df) はその陣地 h の向きでの方向。
 ## 返り値 [h, r, f, dr, df]（中央の段を越えると相手の陣地に入り、向きが反転する）。
-## 中央のマスに入ったときは [3, 0, 0, 0, 0]。盤の外なら []。
+## 中央のマスに入ったときは [CH, 0, 0, 0, 0]。盤の外なら []。
 static func step(h: int, r: int, f: int, dr: int, df: int) -> Array:
 	var nr := r + dr
 	var nf := f + df
@@ -425,13 +456,13 @@ static func step(h: int, r: int, f: int, dr: int, df: int) -> Array:
 	if nr <= TOP:
 		return [h, nr, nf, dr, df]
 	if f == MID and nf == MID:
-		return [3, 0, 0, 0, 0]   # 真ん中の筋をまっすぐ進むと中央
+		return [CH, 0, 0, 0, 0]   # 真ん中の筋をまっすぐ進むと中央
 	# 中央の三角マスの角をはさんだ斜め：真ん中の両隣の筋の奥 ⇔ となりの人の真ん中の筋の奥
 	if f == MID - 1 and nf == MID:
-		return [(h + 2) % 3, TOP, MID, -1, -1]
+		return [(h + N - 1) % N, TOP, MID, -1, -1]
 	if f == MID + 1 and nf == MID:
-		return [(h + 1) % 3, TOP, MID, -1, 1]
-	var q := (h + 1) % 3 if nf > MID else (h + 2) % 3
+		return [(h + 1) % N, TOP, MID, -1, 1]
+	var q := (h + 1) % N if nf > MID else (h + N - 1) % N
 	return [q, TOP, (FILES - 1) - nf, -dr, -df]
 
 ## 中央のマスから、持ち主の向きで v=(前, 右) へ進んだ先（複数あり得る）。
@@ -444,7 +475,7 @@ static func center_steps(owner: int, v: Array) -> Array:
 		return out
 	var hs: Array = []
 	if fwd > 0:
-		for h in 3:
+		for h in N:
 			if h != owner:
 				hs.append(h)
 	else:
@@ -461,26 +492,26 @@ static func orient(owner: int, h: int) -> int:
 static func _ai(a: Array) -> int:
 	return idx(a[0], a[1], a[2])
 
-## 駒の居場所 [h, r, f, s]（s はその陣地での「前」の向き）。中央は [3, 0, 0, 0]
+## 駒の居場所 [h, r, f, s]（s はその陣地での「前」の向き）。中央は [CH, 0, 0, 0]
 static func _start(owner: int, i: int) -> Array:
 	if RECT:
-		# 四角い盤：[4, 段y, 筋x, 向き]。席0は y が増える向きが前、席1は減る向きが前
-		return [4, i / FILES, i % FILES, 1 if owner == 0 else -1]
+		# 四角い盤：[RH, 段y, 筋x, 向き]。席0は y が増える向きが前、席1は減る向きが前
+		return [RH, i / FILES, i % FILES, 1 if owner == 0 else -1]
 	if i == CENTER:
-		return [3, 0, 0, 0]
+		return [CH, 0, 0, 0]
 	var h := cell_h(i)
 	return [h, cell_r(i), cell_f(i), orient(owner, h)]
 
 ## 居場所 pos から、持ち主の向き v に1歩進んだ先の一覧（中央では分かれることがある）
 static func _adv(owner: int, pos: Array, v: Array) -> Array:
-	if pos[0] == 4:
+	if pos[0] == RH:
 		var s4: int = pos[3]
 		var ny: int = pos[1] + s4 * int(v[0])
 		var nx: int = pos[2] + s4 * int(v[1])
 		if ny < 0 or ny >= RANKS or nx < 0 or nx >= FILES:
 			return []
-		return [[4, ny, nx, s4]]
-	if pos[0] == 3:
+		return [[RH, ny, nx, s4]]
+	if pos[0] == CH:
 		var out: Array = []
 		for a in center_steps(owner, v):
 			out.append([a[0], a[1], a[2], -int(v[0])])
@@ -489,14 +520,14 @@ static func _adv(owner: int, pos: Array, v: Array) -> Array:
 	var a := step(pos[0], pos[1], pos[2], s * v[0], s * v[1])
 	if a.is_empty():
 		return []
-	if a[0] == 3:
-		return [[3, 0, 0, 0]]
+	if a[0] == CH:
+		return [[CH, 0, 0, 0]]
 	return [[a[0], a[1], a[2], s if a[0] == pos[0] else -s]]
 
 static func _pi(pos: Array) -> int:
-	if pos[0] == 4:
+	if pos[0] == RH:
 		return pos[1] * FILES + pos[2]
-	return CENTER if pos[0] == 3 else idx(pos[0], pos[1], pos[2])
+	return CENTER if pos[0] == CH else idx(pos[0], pos[1], pos[2])
 
 ## マス i にいる owner の駒が、向き v に1歩進んだ先の一覧（二歩の確認などで使う）
 static func _neighbors(owner: int, i: int, v: Array) -> Array:
@@ -603,7 +634,9 @@ static func is_attacked(board: Array, target: int, defender: int, alive: Array) 
 static func attack_maps(board: Array) -> Array:
 	if is_same(board, _att_board) and _att_ver == _ver:
 		return _att_maps
-	var maps: Array = [{}, {}, {}]
+	var maps: Array = []
+	for _p in NSEAT:
+		maps.append({})
 	for i in CELLS:
 		var c: int = board[i]
 		if c == 0:
@@ -624,7 +657,7 @@ static func in_check(board: Array, pl: int, alive: Array) -> bool:
 		return is_attacked(board, k, pl, alive)
 	var maps := attack_maps(board)
 	for k in royal_cells(board, pl):
-		for o in 3:
+		for o in NSEAT:
 			if o != pl and alive[o] and maps[o].has(k):
 				return true
 	return false
@@ -663,7 +696,7 @@ static func pawn_on_line(board: Array, pl: int, t: int) -> bool:
 				return true
 		return false
 	if t == CENTER:
-		for h in 3:
+		for h in N:
 			for r in RANKS:
 				if board[idx(h, r, MID)] == pawn:
 					return true
@@ -753,7 +786,7 @@ static func _pawn_drop_mate(state: Dictionary, pl: int, t: int) -> bool:
 	var b: Array = state["board"].duplicate()
 	b[t] = make_piece(pl, FU, false)
 	var hit := piece_targets(b, t)
-	for o in 3:
+	for o in NSEAT:
 		if o == pl or not state["alive"][o]:
 			continue
 		var k := find_king(b, o)
@@ -822,7 +855,7 @@ static func eliminate(state: Dictionary, pl: int, reason: String) -> void:
 	state["log"].append("%s: %s" % [player_name_default(pl), reason])
 
 static func player_name_default(p: int) -> String:
-	return ["赤", "青", "緑"][p]
+	return ["赤", "青", "緑", "黄", "紫"][p]
 
 static func alive_count(state: Dictionary) -> int:
 	var n := 0
@@ -832,7 +865,7 @@ static func alive_count(state: Dictionary) -> int:
 
 static func _check_winner(state: Dictionary) -> bool:
 	if alive_count(state) <= 1:
-		for p in 3:
+		for p in state["alive"].size():
 			if state["alive"][p]:
 				state["winner"] = p
 		return true
@@ -848,8 +881,9 @@ static func advance_turn(state: Dictionary) -> void:
 		state["log"].append("%d手に達したので引き分け" % MAX_MOVES)
 		return
 	var p: int = state["turn"]
-	for k in [1, 2]:
-		var q: int = (p + k) % 3
+	var ns: int = state["alive"].size()
+	for k in range(1, ns):
+		var q: int = (p + k) % ns
 		if not state["alive"][q] or not in_check(state["board"], q, state["alive"]):
 			continue
 		if has_legal_move(state, q):
@@ -859,8 +893,8 @@ static func advance_turn(state: Dictionary) -> void:
 		eliminate(state, q, "詰み（王手から逃げられない）")
 		if _check_winner(state):
 			return
-	for _n in 6:
-		p = (p + 1) % 3
+	for _n in ns * 2:
+		p = (p + 1) % ns
 		if not state["alive"][p]:
 			continue
 		if has_legal_move(state, p):
@@ -912,7 +946,7 @@ static func apply_move(state: Dictionary, m: Dictionary) -> void:
 	state["move_no"] += 1
 	state["log"].append("%s %d手目 %s" % [player_name_default(pl), state["move_no"], text])
 	var gave_check := false
-	for o in 3:
+	for o in NSEAT:
 		if o != pl and state["alive"][o] and in_check(board, o, state["alive"]):
 			gave_check = true
 	advance_turn(state)
@@ -940,7 +974,7 @@ static func _record_position(state: Dictionary, mover: int, gave_check: bool) ->
 	if positions.count(key) < 4:
 		return
 	var first := positions.find(key)
-	for x in 3:
+	for x in NSEAT:
 		if not state["alive"][x]:
 			continue
 		var moved := 0
@@ -1021,7 +1055,9 @@ static func cpu_choose(state: Dictionary, pl: int) -> Dictionary:
 
 ## 駒ごとの「そのマスに利いている一番安い駒の値打ち」の表（3人分）
 static func _att_min(b: Array) -> Array:
-	var maps: Array = [{}, {}, {}]
+	var maps: Array = []
+	for _p in NSEAT:
+		maps.append({})
 	for i in CELLS:
 		var c: int = b[i]
 		if c == 0:
@@ -1062,7 +1098,7 @@ static func _deep_score(state: Dictionary, pl: int, m: Dictionary) -> float:
 		var v := float(piece_value(c))
 		if o == pl:
 			var att := 1e9
-			for e in 3:
+			for e in NSEAT:
 				if e != pl and alive[e] and maps[e].has(i):
 					att = minf(att, maps[e][i])
 			if att >= 1e9:
@@ -1085,7 +1121,7 @@ static func _deep_score(state: Dictionary, pl: int, m: Dictionary) -> float:
 	score -= (worst + second * 0.4) * 9.0
 	score += gain * 2.0
 	if CHECK_RULE:
-		for o in 3:
+		for o in NSEAT:
 			if o != pl and alive[o] and in_check(b, o, alive):
 				score += 4.0
 				var s2 := state.duplicate()
@@ -1122,7 +1158,7 @@ static func _cpu_scored(state: Dictionary, pl: int, noise: float) -> Array:
 		if is_attacked(b, to, pl, state["alive"]):
 			score -= piece_value(moved) * 9.0
 		# 相手に王手をかける手を少し好む
-		for o in 3:
+		for o in NSEAT:
 			if o != pl and state["alive"][o] and in_check(b, o, state["alive"]):
 				score += 4.0
 		if m["drop"] >= 0:
@@ -1135,7 +1171,7 @@ static func _cpu_big(state: Dictionary, pl: int, noise: float = 2.0) -> Array:
 	var board: Array = state["board"]
 	var maps := attack_maps(board)
 	var danger := {}
-	for o in 3:
+	for o in NSEAT:
 		if o != pl and state["alive"][o]:
 			danger.merge(maps[o])
 	var out: Array = []
