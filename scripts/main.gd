@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.6"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.7"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -271,6 +271,7 @@ func _read_url_room() -> void:
 #     godot -- --server-url=ws://127.0.0.1:24565 --join-room=TEST --name=A --start-when=3 --auto
 
 var _auto := false
+var _undo_pressed_at := -1
 var _start_when := 0
 
 func _handle_cmdline(args: PackedStringArray) -> void:
@@ -283,6 +284,14 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_auto = true
 		elif a.begins_with("--variant="):
 			Net.variant_id = a.substr(10)
+		elif a == "--auto-undo":
+			Net.state_changed.connect(func():
+				if _undo_pressed_at >= 0:
+					print("[%s] （テスト）待った %s（%d手→%d手）" % [_player_name(), "成功" if Net.state["move_no"] < _undo_pressed_at else "失敗", _undo_pressed_at, Net.state["move_no"]])
+					_undo_pressed_at = -1
+				if Net.mode == Net.Mode.ONLINE and Net.can_undo() and randf() < 0.5:
+					_undo_pressed_at = Net.state["move_no"]
+					Net.undo())
 		elif a.begins_with("--deaf-after="):
 			get_tree().create_timer(float(a.substr(13))).timeout.connect(func():
 				print("[%s] （テスト）ここから受け取らないふり" % _player_name())

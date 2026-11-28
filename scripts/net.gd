@@ -268,6 +268,8 @@ func _start_room() -> void:
 	room["seats"] = seats_new
 	room["seat_tokens"] = seat_tokens   # 席ごとの合言葉（サーバーだけが持つ）
 	room["state"] = Rules.new_game(vid)
+	room["prev"] = {}          # 前の対局の「待った」の記録は持ち越さない
+	room["undo_used"] = []
 	room["state"]["cpu_level"] = int(clock[3]) if clock.size() > 3 else 1
 	_init_clock(room["state"], main, byo)
 	Rules.pick_first(room["state"], _seat_names(seats_new))
