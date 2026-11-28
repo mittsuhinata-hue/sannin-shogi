@@ -62,6 +62,12 @@ var _touches := {}          ## 指の番号 → 位置（2本指でつまむ操�
 var _pinch_dist := 0.0
 var _pinch_mid := Vector2.ZERO
 var _no_click_until := 0    ## つまむ操作の直後は、離した指で駒を選ばない
+var _touch_time := {}       ## 指の番号 → 最後に動いた時刻（ミリ秒）
+var _tap_index := -1        ## 軽く押したか見ている指の番号
+var _tap_pos := Vector2.ZERO
+var _tap_ok := false
+var _touch_drag := false
+const STALE_TOUCH_MS := 3000
 var _sharpen_timer: Timer   ## 拡大が止まったら字をくっきり描き直す
 
 
@@ -590,20 +596,18 @@ func _cell_at(p: Vector2) -> int:
 
 
 func _gui_input(event: InputEvent) -> void:
-	# --- 2本指でつまむ（スマホ）：拡大・縮小と移動 ---
+	# --- 指（スマホ）：1本指で軽く押すと選ぶ・なぞると移動、2本指でつまむと拡大 ---
+	# ブラウザが指をマウスに置き換えた操作は、2本指のあとで止まることがあるので使わず、指の操作を直接見る
 	if event is InputEventScreenTouch:
 		if event.pressed:
-			_touches[event.index] = event.position
-			if _touches.size() == 2:
-				_start_pinch()
+			_touch_down(event.index, event.position)
 		else:
-			_touches.erase(event.index)
-			if _touches.size() < 2 and _pinch_dist > 0.0:
-				_pinch_dist = 0.0
-				_no_click_until = Time.get_ticks_msec() + 400
+			_touch_up(event.index, event.position, true)
+		accept_event()
 		return
 	if event is InputEventScreenDrag:
 		_touches[event.index] = event.position
+		_touch_time[event.index] = Time.get_ticks_msec()
 		if _touches.size() >= 2 and _pinch_dist > 0.0:
 			var pts: Array = _touches.values()
 			var d: float = pts[0].distance_to(pts[1])
@@ -613,11 +617,18 @@ func _gui_input(event: InputEvent) -> void:
 			_pan_by(mid - _pinch_mid)
 			_pinch_dist = max(d, 1.0)
 			_pinch_mid = mid
-			_dragging = true
-			accept_event()
+		elif event.index == _tap_index and _touches.size() == 1:
+			if not _touch_drag and event.position.distance_to(_tap_pos) > DRAG_START:
+				_touch_drag = true
+				_tap_ok = false
+			if _touch_drag:
+				_pan_by(event.relative)
+		accept_event()
 		return
 
-	# --- マウス（スマホの1本指もここに届く）：ホイールで拡大、なぞって移動、軽く押して選ぶ ---
+	# --- マウス：ホイールで拡大、なぞって移動、軽く押して選ぶ ---
+	if (event is InputEventMouseButton or event is InputEventMouseMotion) and event.device == InputEvent.DEVICE_ID_EMULATION:
+		return   # 指をマウスに置き換えたもの（指の操作は上で扱った）
 	if event is InputEventMouseButton:
 		if event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_zoom_at(event.position, 1.15)
@@ -635,21 +646,69 @@ func _gui_input(event: InputEvent) -> void:
 			_dragging = false
 			_press_pos = event.position
 		else:
-			var was_click := _mouse_down and not _dragging and _touches.size() < 2 \
-					and Time.get_ticks_msec() >= _no_click_until
+			var was_click := _mouse_down and not _dragging
 			_mouse_down = false
 			_dragging = false
 			if was_click:
 				_click(event.position)
 		return
 	if event is InputEventMouseMotion and _mouse_down:
-		if _touches.size() >= 2 or _pinch_dist > 0.0:
-			return
 		if not _dragging and event.position.distance_to(_press_pos) > DRAG_START:
 			_dragging = true
 		if _dragging:
 			_pan_by(event.relative)
 
+
+## 指が触れた
+func _touch_down(idx: int, pos: Vector2) -> void:
+	var now := Time.get_ticks_msec()
+	# 離したことを受け取れなかった古い指の記録が残っていたら捨てる（残ると、押すたびに2本指と思ってしまう）
+	for k in _touches.keys():
+		if now - int(_touch_time.get(k, 0)) > STALE_TOUCH_MS:
+			_touches.erase(k)
+			_touch_time.erase(k)
+	if _touches.is_empty():
+		_pinch_dist = 0.0
+	_touches[idx] = pos
+	_touch_time[idx] = now
+	if _touches.size() == 1:
+		_tap_index = idx
+		_tap_pos = pos
+		_tap_ok = true
+		_touch_drag = false
+	else:
+		_tap_ok = false   # 2本目の指：軽く押したことにはしない
+		if _touches.size() == 2:
+			_start_pinch()
+
+
+## 指が離れた。inside=false は盤の外で離れたとき（その場合は選ばない）
+func _touch_up(idx: int, pos: Vector2, inside: bool) -> void:
+	if not _touches.has(idx):
+		return
+	_touches.erase(idx)
+	_touch_time.erase(idx)
+	if _pinch_dist > 0.0 and _touches.size() < 2:
+		_pinch_dist = 0.0
+		_no_click_until = Time.get_ticks_msec() + 300
+	if idx == _tap_index:
+		_tap_index = -1
+		var ok := _tap_ok and inside and _touches.is_empty() and Time.get_ticks_msec() >= _no_click_until
+		_tap_ok = false
+		_touch_drag = false
+		if ok:
+			_click(pos)
+
+
+## 指を盤の外で離しても、離したことは必ず受け取る
+func _input(event: InputEvent) -> void:
+	if event is InputEventScreenTouch and not event.pressed and _touches.has(event.index):
+		if not get_global_rect().has_point(event.position):
+			_touch_up(event.index, Vector2.ZERO, false)
+	elif event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT and _mouse_down:
+		if not get_global_rect().has_point(event.position):
+			_mouse_down = false
+			_dragging = false
 
 func _start_pinch() -> void:
 	var pts: Array = _touches.values()

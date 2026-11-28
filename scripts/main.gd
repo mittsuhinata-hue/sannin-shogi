@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.4"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.5"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
