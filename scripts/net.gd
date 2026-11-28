@@ -25,6 +25,9 @@ const HEARTBEAT := 15.0     ## 合図を送る間隔（秒）
 const KEEPALIVE := 240.0    ## サーバーが眠らないようにページを読みに行く間隔（秒）
 const ROOM_KEEP := 180.0    ## 全員切れた部屋を残しておく時間（秒）
 const RECONNECT_TRIES := 15 ## 再接続を試す回数（3秒おき）
+const SILENT_LIMIT := 40.0  ## サーバーからこの秒数なにも届かなければ、切れたと思って確かめる
+const PROBE_WAIT := 8.0     ## 確かめの合図を送ってから、返事を待つ秒数
+const AWAY_WAIT := 20.0     ## 切れた人の番は、CPUが代わりに指すまでこの秒数待つ
 const CODE_CHARS := "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 enum Mode { NONE, ONLINE, LOCAL, SERVER }
@@ -48,6 +51,7 @@ var _local_room: Dictionary = {}
 
 var _pending: Callable    ## 接続できたらやること
 var test_rooms := false   ## サーバーのテスト用
+var test_deaf := false    ## テスト用：サーバーからの知らせを受け取らないふりをする
 var rejoined := false     ## つなぎ直して席に戻った直後（開始の音を鳴らさないため）
 
 
@@ -280,8 +284,16 @@ func _req_move(m: Dictionary) -> void:
 		return
 	var id := multiplayer.get_remote_sender_id()
 	var room := _room_of(id)
-	if not room.is_empty():
-		_room_try_move(room, _seat_in(room, id), m)
+	if room.is_empty():
+		return
+	var before: int = room["state"].get("move_no", -1) if not room["state"].is_empty() else -1
+	var undo_before: int = room["state"].get("undo_seat", -2) if not room["state"].is_empty() else -2
+	_room_try_move(room, _seat_in(room, id), m)
+	var st: Dictionary = room["state"]
+	if not st.is_empty() and st.get("move_no", -1) == before and st.get("undo_seat", -2) == undo_before:
+		# 指せなかった：その人の画面が古いかもしれないので、席と盤面を送り直す
+		_seats_update.rpc_id(id, room["seats"])
+		_sync.rpc_id(id, st)
 
 
 @rpc("any_peer", "reliable")
@@ -392,12 +404,23 @@ func _rejoin_failed(text: String) -> void:
 ## つながっていることを伝える小さな合図（途中の機器に切られないように）
 @rpc("any_peer", "unreliable")
 func _hb_up() -> void:
-	pass
+	if mode == Mode.SERVER:
+		_hb_down.rpc_id(multiplayer.get_remote_sender_id())   # 返事をして、つながっていることを知らせる
 
 
 @rpc("authority", "unreliable")
 func _hb_down() -> void:
-	pass
+	if test_deaf:
+		return
+	_heard()
+
+
+var _last_heard := 0.0   ## サーバーから最後になにか届いた時刻
+var _probe_at := 0.0     ## 確かめの合図を送った時刻（0 = 送っていない）
+
+func _heard() -> void:
+	_last_heard = _now()
+	_probe_at = 0.0
 
 
 var _hb_accum := 0.0
@@ -428,6 +451,15 @@ func _client_housekeeping(dt: float) -> void:
 	if _hb_accum >= HEARTBEAT:
 		_hb_accum = 0.0
 		_hb_up.rpc_id(1)
+	# 画面を消していた間などに黙って切れていないか確かめる
+	if _probe_at <= 0.0 and _last_heard > 0.0 and _now() - _last_heard > SILENT_LIMIT:
+		_probe_at = _now()
+		_hb_up.rpc_id(1)
+	elif _probe_at > 0.0 and _now() - _probe_at > PROBE_WAIT and _can_reconnect():
+			print("サーバーから返事がないので、つなぎ直します")
+			_probe_at = 0.0
+			_last_heard = 0.0
+			simulate_drop()
 	_keepalive_accum += dt
 	if _keepalive_accum >= KEEPALIVE and room_code != "":
 		_keepalive_accum = 0.0
@@ -472,7 +504,9 @@ func _room_try_move(room: Dictionary, seat: int, m: Dictionary) -> void:
 	if not Rules.is_legal(st, seat, m):
 		return
 	# 待ったに備えて、指す前の盤面をとっておく（手番ごとに1回まで）
-	var used: Array = room.get("undo_used", [false, false, false])
+	var used: Array = room.get("undo_used", [])
+	while used.size() < st["alive"].size():
+		used.append(false)
 	var undoable: bool = not used[seat]
 	used[seat] = false
 	room["undo_used"] = used
@@ -502,7 +536,11 @@ func _room_undo(room: Dictionary, seat: int) -> void:
 	room["prev"] = {}
 	prev["undo_seat"] = -1
 	prev["log"].append("%s が待った" % str(room["seats"][seat]["name"]))
-	room["undo_used"][seat] = true
+	var used: Array = room.get("undo_used", [])
+	while used.size() <= seat:
+		used.append(false)
+	used[seat] = true
+	room["undo_used"] = used
 	room["state"] = prev
 	_push(room)
 
@@ -529,6 +567,8 @@ func _push(room: Dictionary) -> void:
 	if not st.is_empty() and st["winner"] < 0 and room["seats"][st["turn"]]["id"] == ID_CPU:
 		# 人が指した直後は、待ったできるように少し長めに待つ
 		var wait := UNDO_WAIT if st.get("undo_seat", -1) >= 0 else CPU_DELAY
+		if room["seats"][st["turn"]].get("away", false):
+			wait = AWAY_WAIT   # 切れた人がつなぎ直して戻ってくるのを待つ
 		room["cpu_at"] = Time.get_ticks_msec() / 1000.0 + wait
 
 
@@ -610,6 +650,7 @@ func join_room(url: String, code: String, player_name: String) -> void:
 
 ## テスト用：通信がいきなり切れたことにする
 func simulate_drop() -> void:
+	test_deaf = false
 	if multiplayer.multiplayer_peer and not (multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
 		multiplayer.multiplayer_peer.close()
 	_on_server_gone()
@@ -657,6 +698,7 @@ func _on_connected() -> void:
 	if not _reconnecting:
 		message.emit("接続しました")
 	_hb_accum = 0.0
+	_heard()
 	if _pending.is_valid():
 		_pending.call()
 
@@ -739,6 +781,9 @@ func _seats_update(s: Array) -> void:
 
 @rpc("authority", "reliable")
 func _sync(s: Dictionary) -> void:
+	if test_deaf:
+		return   # テスト用：黙って切れたスマホのまね
+	_heard()
 	state = s
 	Rules.use(s)
 	_recv_time = _now()
@@ -812,6 +857,10 @@ func submit_move(m: Dictionary) -> void:
 			_room_try_move(_local_room, state["turn"], m)
 		Mode.ONLINE:
 			_req_move.rpc_id(1, m)
+			# 返事（新しい盤面）が来なければ、切れていると思ってつなぎ直す
+			if _probe_at <= 0.0:
+				_probe_at = _now()
+				_hb_up.rpc_id(1)
 
 
 ## この端末で「待った」を押せるか

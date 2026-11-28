@@ -6,7 +6,7 @@ const Rules = preload("res://scripts/rules.gd")
 const BoardView = preload("res://scripts/board_view.gd")
 const UiFont = preload("res://scripts/ui_font.gd")
 const SETTINGS_PATH := "user://settings.cfg"
-const VERSION := "2.5"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
+const VERSION := "2.6"   ## 直すたびに上げる（友だちの画面が新しいか見分けるため）
 
 var _font: Font
 
@@ -283,6 +283,10 @@ func _handle_cmdline(args: PackedStringArray) -> void:
 			_auto = true
 		elif a.begins_with("--variant="):
 			Net.variant_id = a.substr(10)
+		elif a.begins_with("--deaf-after="):
+			get_tree().create_timer(float(a.substr(13))).timeout.connect(func():
+				print("[%s] （テスト）ここから受け取らないふり" % _player_name())
+				Net.test_deaf = true)
 		elif a.begins_with("--level="):
 			Net.cpu_level = int(a.substr(8))
 		elif a.begins_with("--main="):
